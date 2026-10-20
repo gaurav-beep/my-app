@@ -7,9 +7,8 @@ spring:
     hibernate:
       ddl-auto: validate
 app:
-  user: ${APP_USER}
-  password: ${APP_PASSWORD}
   jwt-secret: ${APP_JWT_SECRET}
+  google-client-id: ${GOOGLE_CLIENT_ID:}
 management:
   endpoints:
     web:

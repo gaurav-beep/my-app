@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useState } from 'react'
+import { useCallback, useEffect, useRef, useState } from 'react'
 
 type Expense = { id: number; description: string; amount: number; category: string; spentOn: string }
 type Total = { category: string; total: number }
@@ -13,43 +13,70 @@ async function api(path: string, init: RequestInit = {}) {
     ...init,
     headers: { 'Content-Type': 'application/json', ...(token ? { Authorization: `Bearer ${token}` } : {}) },
   })
-  if (res.status === 401 && path !== '/login') {
+  if (res.status === 401 && !path.startsWith('/auth/')) {
     localStorage.removeItem('token')
+    localStorage.removeItem('user')
     window.location.reload()
   }
   return res
 }
 
+declare global {
+  interface Window { google?: any }
+}
+
 function Login({ onLogin }: { onLogin: () => void }) {
-  const [username, setUsername] = useState('')
-  const [password, setPassword] = useState('')
   const [error, setError] = useState('')
   const [busy, setBusy] = useState(false)
+  const buttonRef = useRef<HTMLDivElement>(null)
 
-  const submit = async (e: React.FormEvent) => {
-    e.preventDefault()
-    setBusy(true)
-    setError('')
-    try {
-      const res = await api('/login', { method: 'POST', body: JSON.stringify({ username, password }) })
-      if (!res.ok) throw new Error(res.status === 401 ? 'Invalid username or password' : 'Server error')
-      localStorage.setItem('token', (await res.json()).token)
-      onLogin()
-    } catch (err) {
-      setError((err as Error).message)
-    } finally {
-      setBusy(false)
+  useEffect(() => {
+    let cancelled = false
+    const init = async () => {
+      const cfg = await (await fetch('/api/auth/config')).json()
+      if (!cfg.googleClientId) return setError('Google sign-in is not configured yet')
+      await new Promise<void>((resolve, reject) => {
+        if (window.google?.accounts) return resolve()
+        const s = document.createElement('script')
+        s.src = 'https://accounts.google.com/gsi/client'
+        s.onload = () => resolve()
+        s.onerror = () => reject(new Error('Could not load Google sign-in'))
+        document.head.appendChild(s)
+      })
+      if (cancelled || !buttonRef.current) return
+      window.google.accounts.id.initialize({
+        client_id: cfg.googleClientId,
+        callback: async (resp: { credential: string }) => {
+          setBusy(true)
+          setError('')
+          try {
+            const res = await api('/auth/google', { method: 'POST', body: JSON.stringify({ credential: resp.credential }) })
+            if (!res.ok) throw new Error(res.status === 401 ? 'Google sign-in was rejected' : 'Server error')
+            const data = await res.json()
+            localStorage.setItem('token', data.token)
+            localStorage.setItem('user', JSON.stringify(data.user))
+            onLogin()
+          } catch (err) {
+            setError((err as Error).message)
+          } finally {
+            setBusy(false)
+          }
+        },
+      })
+      window.google.accounts.id.renderButton(buttonRef.current, { theme: 'outline', size: 'large', text: 'continue_with', width: 280 })
     }
-  }
+    init().catch(err => setError((err as Error).message || 'Could not reach the server'))
+    return () => { cancelled = true }
+  }, [onLogin])
 
   return (
-    <form onSubmit={submit} style={{ maxWidth: 320, margin: '4rem auto', display: 'grid', gap: 8, fontFamily: 'sans-serif' }}>
+    <div style={{ maxWidth: 320, margin: '4rem auto', display: 'grid', gap: 12, fontFamily: 'sans-serif', textAlign: 'center', padding: '0 1rem' }}>
       <h1>Expense Tracker</h1>
-      <input placeholder="Username" value={username} onChange={e => setUsername(e.target.value)} autoFocus />
-      <input placeholder="Password" type="password" value={password} onChange={e => setPassword(e.target.value)} />
-      <button disabled={busy}>{busy ? 'Signing in (server may be waking up)...' : 'Sign in'}</button>
+      <p>Sign in or sign up with your Google account.</p>
+      <div ref={buttonRef} style={{ display: 'flex', justifyContent: 'center', minHeight: 44 }} />
+      {busy && <p>Signing in (server may be waking up)...</p>}
       {error && <p style={{ color: 'crimson' }}>{error}</p>}
-    </form>
+    </div>
   )
 }
 
@@ -62,6 +89,7 @@ function Tracker({ onLogout }: { onLogout: () => void }) {
   const [category, setCategory] = useState(CATEGORIES[0])
   const [spentOn, setSpentOn] = useState(today())
   const [error, setError] = useState('')
+  const user: { name?: string; email?: string } = JSON.parse(localStorage.getItem('user') || '{}')
 
   const load = useCallback(async () => {
     const [a, b] = await Promise.all([api(`/expenses?month=${month}`), api(`/expenses/summary?month=${month}`)])
@@ -96,7 +124,7 @@ function Tracker({ onLogout }: { onLogout: () => void }) {
     <div style={{ maxWidth: 640, margin: '2rem auto', fontFamily: 'sans-serif', padding: '0 1rem' }}>
       <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
         <h1>Expense Tracker</h1>
-        <button onClick={() => { localStorage.removeItem('token'); onLogout() }}>Sign out</button>
+        <span>{user.name || user.email} <button onClick={() => { localStorage.removeItem('token'); localStorage.removeItem('user'); onLogout() }}>Sign out</button></span>
       </div>
 
       <form onSubmit={add} style={{ display: 'flex', flexWrap: 'wrap', gap: 6 }}>

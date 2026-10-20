@@ -4,6 +4,8 @@ import java.math.BigDecimal;
 import java.time.LocalDate;
 import java.time.LocalDateTime;
 
+import com.fasterxml.jackson.annotation.JsonIgnore;
+
 import jakarta.persistence.*;
 import jakarta.validation.constraints.NotBlank;
 import jakarta.validation.constraints.NotNull;
@@ -23,6 +25,9 @@ public class Expense {
     @NotNull
     @Column(name = "spent_on")
     public LocalDate spentOn;
+    @JsonIgnore
+    @Column(name = "user_id")
+    public Long userId;
     @Column(name = "created_at", insertable = false, updatable = false)
     public LocalDateTime createdAt;
 }

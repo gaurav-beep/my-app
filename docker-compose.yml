@@ -20,9 +20,8 @@ services:
       DB_URL: jdbc:postgresql://db:5432/app
       DB_USER: ${DB_USER:-app}
       DB_PASS: ${DB_PASS}
-      APP_USER: ${APP_USER:?set APP_USER in .env}
-      APP_PASSWORD: ${APP_PASSWORD:?set APP_PASSWORD in .env}
       APP_JWT_SECRET: ${APP_JWT_SECRET:?set APP_JWT_SECRET in .env}
+      GOOGLE_CLIENT_ID: ${GOOGLE_CLIENT_ID:-}
     depends_on:
       db:
         condition: service_healthy
