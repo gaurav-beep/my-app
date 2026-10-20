@@ -240,72 +240,9 @@ type HoldingRow = {
   price: number | null; value: number | null; gain: number | null; gainPct: number | null
 }
 type Portfolio = { holdings: HoldingRow[]; totalInvested: number; totalValue: number; totalGain: number; unknownCost: number; complete: boolean }
-type Hit = { symbol: string; name: string }
 
 const signed = (n: number) => `${n >= 0 ? '+' : '-'}${money(Math.abs(n))}`
 const gainColor = (n: number | null) => (n == null ? undefined : n >= 0 ? '#16a34a' : 'var(--danger)')
-
-function AddHolding({ onAdded, showToast }: { onAdded: () => void; showToast: (t: { msg: string }) => void }) {
-  const [type, setType] = useState<'mf' | 'stock' | 'crypto'>('mf')
-  const [q, setQ] = useState('')
-  const [hits, setHits] = useState<Hit[]>([])
-  const [searching, setSearching] = useState(false)
-  const [picked, setPicked] = useState<Hit | null>(null)
-  const [units, setUnits] = useState('')
-  const [invested, setInvested] = useState('')
-  const [busy, setBusy] = useState(false)
-
-  useEffect(() => {
-    setHits([])
-    if (picked || q.trim().length < 2) return
-    setSearching(true)
-    const t = setTimeout(async () => {
-      try {
-        const res = await api(`/search/${type}?q=${encodeURIComponent(q.trim())}`)
-        if (res.ok) setHits(await res.json())
-      } finally {
-        setSearching(false)
-      }
-    }, 400)
-    return () => { clearTimeout(t); setSearching(false) }
-  }, [q, type, picked])
-
-  const save = async (e: FormEvent) => {
-    e.preventDefault()
-    const u = Number(units.replace(',', '.'))
-    const i = Number(invested.replace(',', '.'))
-    if (!picked || !(u > 0) || !(i >= 0) || invested === '') return showToast({ msg: 'Pick an asset, then enter units and amount invested' })
-    setBusy(true)
-    const res = await api('/holdings', { method: 'POST', body: JSON.stringify({ type, symbol: picked.symbol, name: picked.name, units: u, invested: i }) })
-    setBusy(false)
-    if (!res.ok) return showToast({ msg: 'Could not save. Please try again.' })
-    setPicked(null); setQ(''); setUnits(''); setInvested('')
-    showToast({ msg: 'Added' })
-    onAdded()
-  }
-
-  return (
-    <form onSubmit={save} className="card form">
-      <div className="tabs">
-        <button type="button" className={type === 'mf' ? 'on' : ''} onClick={() => { setType('mf'); setPicked(null); setQ('') }}>Mutual fund</button>
-        <button type="button" className={type === 'stock' ? 'on' : ''} onClick={() => { setType('stock'); setPicked(null); setQ('') }}>Stock</button>
-        <button type="button" className={type === 'crypto' ? 'on' : ''} onClick={() => { setType('crypto'); setPicked(null); setQ('') }}>Crypto</button>
-      </div>
-      {picked ? (
-        <div className="kv"><strong>{picked.name}</strong><button type="button" onClick={() => setPicked(null)}>Change</button></div>
-      ) : (
-        <>
-          <input placeholder={type === 'mf' ? 'Search fund, e.g. Parag Parikh' : type === 'stock' ? 'Search NSE/BSE stock, e.g. Reliance' : 'Search coin, e.g. Bitcoin'} value={q} onChange={e => setQ(e.target.value)} aria-label="Search" />
-          {searching && <p className="muted">Searching...</p>}
-          {hits.map(h => <button type="button" key={h.symbol} className="hit" onClick={() => setPicked(h)}>{h.name}</button>)}
-        </>
-      )}
-      <input inputMode="decimal" placeholder={type === 'mf' ? 'Units held' : type === 'stock' ? 'Shares held' : 'Quantity held'} value={units} onChange={e => setUnits(e.target.value)} aria-label="Units" />
-      <input inputMode="decimal" placeholder="Total amount invested (INR)" value={invested} onChange={e => setInvested(e.target.value)} aria-label="Amount invested" />
-      <button className="primary" disabled={busy}>{busy ? 'Saving...' : 'Add holding'}</button>
-    </form>
-  )
-}
 
 function CoinDcxCard({ onChange, showToast }: { onChange: () => void; showToast: (t: { msg: string }) => void }) {
   const [status, setStatus] = useState<{ available: boolean; linked: boolean } | null>(null)
@@ -550,8 +487,6 @@ function Investments({ showToast }: { showToast: (t: { msg: string; undo?: () =>
 
       <CoinDcxCard onChange={load} showToast={showToast} />
 
-      <AddHolding onAdded={load} showToast={showToast} />
-
       {loading && slow && <p className="muted center">{WAKING}</p>}
       {data?.holdings.map(h => editId === h.id ? (
         <section key={h.id} className="card form">
@@ -578,7 +513,7 @@ function Investments({ showToast }: { showToast: (t: { msg: string; undo?: () =>
           </span>
         </button>
       ))}
-      {data?.holdings.length === 0 && !loading && <p className="muted center">No holdings yet. Search for a mutual fund or coin above to add your first one.</p>}
+      {data?.holdings.length === 0 && !loading && <p className="muted center">No holdings yet. Connect Zerodha or CoinDCX above and they load automatically.</p>}
     </>
   )
 }
