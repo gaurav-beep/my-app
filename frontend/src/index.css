@@ -70,6 +70,12 @@ small, .muted { color: var(--muted); }
 .row .primary { flex: 1; background: var(--accent); border-color: var(--accent); color: #fff; font-weight: 600; }
 .danger { color: var(--danger); }
 
+.tabs { display: flex; gap: 0.4rem; }
+.tabs button { flex: 1; }
+.tabs button.on { background: var(--accent); border-color: var(--accent); color: #fff; font-weight: 600; }
+.hit { text-align: left; }
+.right { display: grid; text-align: right; }
+
 .setup { display: grid; gap: 0.5rem; }
 .setup p, .setup ol { margin: 0; }
 .setup ol { padding-left: 1.2rem; }

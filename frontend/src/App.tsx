@@ -235,6 +235,177 @@ function SmsSetup() {
   )
 }
 
+type HoldingRow = {
+  id: number; type: 'mf' | 'crypto'; symbol: string; name: string; units: number; invested: number
+  price: number | null; value: number | null; gain: number | null; gainPct: number | null
+}
+type Portfolio = { holdings: HoldingRow[]; totalInvested: number; totalValue: number; complete: boolean }
+type Hit = { symbol: string; name: string }
+
+const signed = (n: number) => `${n >= 0 ? '+' : '-'}${money(Math.abs(n))}`
+const gainColor = (n: number | null) => (n == null ? undefined : n >= 0 ? '#16a34a' : 'var(--danger)')
+
+function AddHolding({ onAdded, showToast }: { onAdded: () => void; showToast: (t: { msg: string }) => void }) {
+  const [type, setType] = useState<'mf' | 'crypto'>('mf')
+  const [q, setQ] = useState('')
+  const [hits, setHits] = useState<Hit[]>([])
+  const [searching, setSearching] = useState(false)
+  const [picked, setPicked] = useState<Hit | null>(null)
+  const [units, setUnits] = useState('')
+  const [invested, setInvested] = useState('')
+  const [busy, setBusy] = useState(false)
+
+  useEffect(() => {
+    setHits([])
+    if (picked || q.trim().length < 2) return
+    setSearching(true)
+    const t = setTimeout(async () => {
+      try {
+        const res = await api(`/search/${type}?q=${encodeURIComponent(q.trim())}`)
+        if (res.ok) setHits(await res.json())
+      } finally {
+        setSearching(false)
+      }
+    }, 400)
+    return () => { clearTimeout(t); setSearching(false) }
+  }, [q, type, picked])
+
+  const save = async (e: FormEvent) => {
+    e.preventDefault()
+    const u = Number(units.replace(',', '.'))
+    const i = Number(invested.replace(',', '.'))
+    if (!picked || !(u > 0) || !(i >= 0) || invested === '') return showToast({ msg: 'Pick an asset, then enter units and amount invested' })
+    setBusy(true)
+    const res = await api('/holdings', { method: 'POST', body: JSON.stringify({ type, symbol: picked.symbol, name: picked.name, units: u, invested: i }) })
+    setBusy(false)
+    if (!res.ok) return showToast({ msg: 'Could not save. Please try again.' })
+    setPicked(null); setQ(''); setUnits(''); setInvested('')
+    showToast({ msg: 'Added' })
+    onAdded()
+  }
+
+  return (
+    <form onSubmit={save} className="card form">
+      <div className="tabs">
+        <button type="button" className={type === 'mf' ? 'on' : ''} onClick={() => { setType('mf'); setPicked(null); setQ('') }}>Mutual fund</button>
+        <button type="button" className={type === 'crypto' ? 'on' : ''} onClick={() => { setType('crypto'); setPicked(null); setQ('') }}>Crypto</button>
+      </div>
+      {picked ? (
+        <div className="kv"><strong>{picked.name}</strong><button type="button" onClick={() => setPicked(null)}>Change</button></div>
+      ) : (
+        <>
+          <input placeholder={type === 'mf' ? 'Search fund, e.g. Parag Parikh' : 'Search coin, e.g. Bitcoin'} value={q} onChange={e => setQ(e.target.value)} aria-label="Search" />
+          {searching && <p className="muted">Searching...</p>}
+          {hits.map(h => <button type="button" key={h.symbol} className="hit" onClick={() => setPicked(h)}>{h.name}</button>)}
+        </>
+      )}
+      <input inputMode="decimal" placeholder={type === 'mf' ? 'Units held' : 'Quantity held'} value={units} onChange={e => setUnits(e.target.value)} aria-label="Units" />
+      <input inputMode="decimal" placeholder="Total amount invested (INR)" value={invested} onChange={e => setInvested(e.target.value)} aria-label="Amount invested" />
+      <button className="primary" disabled={busy}>{busy ? 'Saving...' : 'Add holding'}</button>
+    </form>
+  )
+}
+
+function Investments({ showToast }: { showToast: (t: { msg: string; undo?: () => void }) => void }) {
+  const [data, setData] = useState<Portfolio | null>(null)
+  const [loading, setLoading] = useState(true)
+  const [editId, setEditId] = useState<number | null>(null)
+  const [eUnits, setEUnits] = useState('')
+  const [eInvested, setEInvested] = useState('')
+  const slow = useSlow(loading)
+
+  const load = useCallback(async (silent = false) => {
+    if (!silent) setLoading(true)
+    try {
+      const res = await api('/holdings')
+      if (res.ok) setData(await res.json())
+    } catch {
+      if (!silent) showToast({ msg: 'Could not load. Check your connection.' })
+    } finally {
+      if (!silent) setLoading(false)
+    }
+  }, [showToast])
+  useEffect(() => { load() }, [load])
+  useEffect(() => {
+    const refresh = () => { if (document.visibilityState === 'visible') load(true) }
+    const t = setInterval(refresh, 60000)
+    document.addEventListener('visibilitychange', refresh)
+    return () => { clearInterval(t); document.removeEventListener('visibilitychange', refresh) }
+  }, [load])
+
+  const startEdit = (h: HoldingRow) => { setEditId(h.id); setEUnits(String(h.units)); setEInvested(String(h.invested)) }
+  const saveEdit = async (h: HoldingRow) => {
+    const u = Number(eUnits.replace(',', '.'))
+    const i = Number(eInvested.replace(',', '.'))
+    if (!(u > 0) || !(i >= 0)) return showToast({ msg: 'Enter valid numbers' })
+    const res = await api(`/holdings/${h.id}`, { method: 'PUT', body: JSON.stringify({ type: h.type, symbol: h.symbol, name: h.name, units: u, invested: i }) })
+    if (!res.ok) return showToast({ msg: 'Could not save. Please try again.' })
+    setEditId(null)
+    showToast({ msg: 'Saved' })
+    load()
+  }
+  const remove = async (h: HoldingRow) => {
+    const res = await api(`/holdings/${h.id}`, { method: 'DELETE' })
+    if (!res.ok) return showToast({ msg: 'Could not delete. Please try again.' })
+    setEditId(null)
+    load()
+    showToast({
+      msg: 'Deleted',
+      undo: async () => {
+        await api('/holdings', { method: 'POST', body: JSON.stringify({ type: h.type, symbol: h.symbol, name: h.name, units: h.units, invested: h.invested }) })
+        load()
+      },
+    })
+  }
+
+  const gain = data ? data.totalValue - data.totalInvested : 0
+  const pct = data && data.totalInvested > 0 ? (gain / data.totalInvested) * 100 : null
+
+  return (
+    <>
+      <section className="card summary">
+        <div className="muted center">Current value</div>
+        <div className="grand">{data ? money(data.totalValue) : <span className="skeleton w60" />}</div>
+        {data && (
+          <div className="center">
+            Invested {money(data.totalInvested)}
+            {data.holdings.length > 0 && <strong style={{ color: gainColor(gain), marginLeft: 8 }}>{signed(gain)}{pct != null ? ` (${pct.toFixed(2)}%)` : ''}</strong>}
+          </div>
+        )}
+        {data && !data.complete && <p className="muted center">Some prices are unavailable right now. Those holdings are counted at the amount invested.</p>}
+      </section>
+
+      <AddHolding onAdded={load} showToast={showToast} />
+
+      {loading && slow && <p className="muted center">{WAKING}</p>}
+      {data?.holdings.map(h => editId === h.id ? (
+        <section key={h.id} className="card form">
+          <strong>{h.name}</strong>
+          <input inputMode="decimal" value={eUnits} onChange={e => setEUnits(e.target.value)} aria-label="Units" />
+          <input inputMode="decimal" value={eInvested} onChange={e => setEInvested(e.target.value)} aria-label="Amount invested" />
+          <div className="row">
+            <button className="primary" onClick={() => saveEdit(h)}>Save</button>
+            <button onClick={() => setEditId(null)}>Cancel</button>
+            <button className="danger" onClick={() => remove(h)}>Delete</button>
+          </div>
+        </section>
+      ) : (
+        <button key={h.id} className="card item" onClick={() => startEdit(h)}>
+          <span className="desc">
+            <span>{h.name}</span>
+            <small>{h.units} {h.type === 'mf' ? 'units' : 'qty'} &middot; invested {money(h.invested)}</small>
+          </span>
+          <span className="right">
+            <strong>{h.value != null ? money(h.value) : 'Price n/a'}</strong>
+            {h.gain != null && <small style={{ color: gainColor(h.gain) }}>{signed(h.gain)}{h.gainPct != null ? ` (${h.gainPct.toFixed(2)}%)` : ''}</small>}
+          </span>
+        </button>
+      ))}
+      {data?.holdings.length === 0 && !loading && <p className="muted center">No holdings yet. Search for a mutual fund or coin above to add your first one.</p>}
+    </>
+  )
+}
+
 function Tracker({ onLogout }: { onLogout: () => void }) {
   const [month, setMonth] = useState(today().slice(0, 7))
   const [expenses, setExpenses] = useState<Expense[] | null>(null)
@@ -243,17 +414,18 @@ function Tracker({ onLogout }: { onLogout: () => void }) {
   const [editId, setEditId] = useState<number | null>(null)
   const [toast, setToast] = useState<ToastState>(null)
   const [showSms, setShowSms] = useState(false)
+  const [tab, setTab] = useState<'expenses' | 'investments'>('expenses')
   const [category, setCategory] = useState(localStorage.getItem('lastCategory') || CATEGORIES[0])
   const toastTimer = useRef<ReturnType<typeof setTimeout>>(undefined)
   const reqId = useRef(0)
   const slow = useSlow(loading)
   const user: UserInfo = JSON.parse(localStorage.getItem('user') || '{}')
 
-  const showToast = (t: NonNullable<ToastState>) => {
+  const showToast = useCallback((t: NonNullable<ToastState>) => {
     clearTimeout(toastTimer.current)
     setToast(t)
     toastTimer.current = setTimeout(() => setToast(null), 6000)
-  }
+  }, [])
 
   const load = useCallback(async (silent = false) => {
     const id = ++reqId.current
@@ -346,6 +518,12 @@ function Tracker({ onLogout }: { onLogout: () => void }) {
       </header>
       {showSms && <SmsSetup />}
 
+      <nav className="tabs">
+        <button className={tab === 'expenses' ? 'on' : ''} onClick={() => setTab('expenses')}>Expenses</button>
+        <button className={tab === 'investments' ? 'on' : ''} onClick={() => setTab('investments')}>Investments</button>
+      </nav>
+
+      {tab === 'investments' ? <Investments showToast={showToast} /> : <>
       <EntryForm label="Add expense" focus initial={{ amount: '', description: '', category, spentOn: today() }} onSubmit={add} />
 
       <section className="card summary">
@@ -383,6 +561,7 @@ function Tracker({ onLogout }: { onLogout: () => void }) {
         </button>
       ))}
       {expenses?.length === 0 && !loading && <p className="muted center">No expenses in {label} yet. Add your first one above.</p>}
+      </>}
 
       {toast && (
         <div className="toast" role="status">
