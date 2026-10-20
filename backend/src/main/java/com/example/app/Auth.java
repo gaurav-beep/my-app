@@ -54,7 +54,7 @@ class SecurityConfig {
             .csrf(c -> c.disable())
             .sessionManagement(s -> s.sessionCreationPolicy(SessionCreationPolicy.STATELESS))
             .authorizeHttpRequests(a -> a
-                .requestMatchers("/api/auth/**", "/api/ingest/sms", "/actuator/health/**").permitAll()
+                .requestMatchers("/api/auth/**", "/api/ingest/sms", "/api/kite/callback", "/actuator/health/**").permitAll()
                 .anyRequest().authenticated())
             .oauth2ResourceServer(o -> o.jwt(Customizer.withDefaults()))
             .build();

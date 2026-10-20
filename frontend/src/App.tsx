@@ -236,7 +236,7 @@ function SmsSetup() {
 }
 
 type HoldingRow = {
-  id: number; type: 'mf' | 'stock' | 'crypto' | 'coindcx'; symbol: string; name: string; units: number; invested: number | null
+  id: number; type: 'mf' | 'stock' | 'crypto' | 'coindcx' | 'kitemf'; source?: string; symbol: string; name: string; units: number; invested: number | null
   price: number | null; value: number | null; gain: number | null; gainPct: number | null
 }
 type Portfolio = { holdings: HoldingRow[]; totalInvested: number; totalValue: number; totalGain: number; unknownCost: number; complete: boolean }
@@ -384,6 +384,98 @@ function CoinDcxCard({ onChange, showToast }: { onChange: () => void; showToast:
   )
 }
 
+function KiteCard({ onChange, showToast }: { onChange: () => void; showToast: (t: { msg: string }) => void }) {
+  const [status, setStatus] = useState<{ available: boolean; linked: boolean; connected: boolean } | null>(null)
+  const [open, setOpen] = useState(false)
+  const [apiKey, setApiKey] = useState('')
+  const [apiSecret, setApiSecret] = useState('')
+  const [busy, setBusy] = useState(false)
+  const callback = `${window.location.origin}/api/kite/callback`
+
+  const refresh = useCallback(() => {
+    api('/kite/status').then(r => r.json()).then(setStatus).catch(() => setStatus({ available: false, linked: false, connected: false }))
+  }, [])
+  useEffect(() => { refresh() }, [refresh])
+
+  const login = async () => {
+    setBusy(true)
+    try {
+      const res = await api('/kite/login', { method: 'POST' })
+      if (!res.ok) return showToast({ msg: 'Could not start Zerodha login. Please try again.' })
+      window.location.href = (await res.json()).url
+    } finally {
+      setBusy(false)
+    }
+  }
+
+  const save = async (e: FormEvent) => {
+    e.preventDefault()
+    setBusy(true)
+    try {
+      const res = await api('/kite/app', { method: 'PUT', body: JSON.stringify({ apiKey, apiSecret }) })
+      if (!res.ok) return showToast({ msg: 'Could not save. Please try again.' })
+      setApiKey('')
+      setApiSecret('')
+      setOpen(false)
+      await login()
+    } finally {
+      setBusy(false)
+    }
+  }
+
+  const sync = async () => {
+    setBusy(true)
+    try {
+      const res = await api('/kite/sync', { method: 'POST' })
+      if (res.status === 409) return await login()
+      if (!res.ok) return showToast({ msg: 'Zerodha sync failed. Please try again.' })
+      showToast({ msg: 'Zerodha synced' })
+      onChange()
+      refresh()
+    } finally {
+      setBusy(false)
+    }
+  }
+
+  const disconnect = async () => {
+    if (!window.confirm('Disconnect Zerodha? This removes the synced Zerodha holdings from this app (nothing changes at Zerodha).')) return
+    await api('/kite/app', { method: 'DELETE' })
+    showToast({ msg: 'Zerodha disconnected' })
+    refresh()
+    onChange()
+  }
+
+  if (!status || !status.available) return null
+  return (
+    <section className="card setup">
+      <div className="kv">
+        <strong>Zerodha</strong>
+        {status.linked ? (
+          <span className="row">
+            <button type="button" onClick={sync} disabled={busy}>{busy ? 'Working...' : status.connected ? 'Sync now' : 'Log in and sync'}</button>
+            <button type="button" className="danger" onClick={disconnect} disabled={busy}>Disconnect</button>
+          </span>
+        ) : (
+          <button type="button" onClick={() => setOpen(o => !o)}>{open ? 'Close' : 'Connect'}</button>
+        )}
+      </div>
+      {status.linked && <small className="muted">Stocks and Coin funds from your Zerodha account. Zerodha asks you to log in again each day, so press the button when you want fresh numbers.</small>}
+      {open && !status.linked && (
+        <form onSubmit={save} className="form">
+          <ol>
+            <li>Sign in at <b>developers.kite.trade</b> and create an app on the free <b>Personal</b> plan.</li>
+            <li>Set its <b>Redirect URL</b> to exactly:<br /><code>{callback}</code></li>
+            <li>Paste the app's API key and secret below. They are encrypted before being stored.</li>
+          </ol>
+          <input placeholder="API key" value={apiKey} onChange={e => setApiKey(e.target.value)} autoComplete="off" aria-label="API key" />
+          <input placeholder="API secret" type="password" value={apiSecret} onChange={e => setApiSecret(e.target.value)} autoComplete="off" aria-label="API secret" />
+          <button className="primary" disabled={busy || !apiKey || !apiSecret}>{busy ? 'Saving...' : 'Save and log in to Zerodha'}</button>
+        </form>
+      )}
+    </section>
+  )
+}
+
 function Investments({ showToast }: { showToast: (t: { msg: string; undo?: () => void }) => void }) {
   const [data, setData] = useState<Portfolio | null>(null)
   const [loading, setLoading] = useState(true)
@@ -454,6 +546,8 @@ function Investments({ showToast }: { showToast: (t: { msg: string; undo?: () =>
         {data && !data.complete && <p className="muted center">Some prices are unavailable right now. Those holdings are counted at the amount invested.</p>}
       </section>
 
+      <KiteCard onChange={load} showToast={showToast} />
+
       <CoinDcxCard onChange={load} showToast={showToast} />
 
       <AddHolding onAdded={load} showToast={showToast} />
@@ -462,13 +556,14 @@ function Investments({ showToast }: { showToast: (t: { msg: string; undo?: () =>
       {data?.holdings.map(h => editId === h.id ? (
         <section key={h.id} className="card form">
           <strong>{h.name}</strong>
-          <input inputMode="decimal" value={eUnits} onChange={e => setEUnits(e.target.value)} aria-label="Units" disabled={h.type === 'coindcx'} />
-          <input inputMode="decimal" placeholder="Total amount invested (INR)" value={eInvested} onChange={e => setEInvested(e.target.value)} aria-label="Amount invested" />
+          <input inputMode="decimal" value={eUnits} onChange={e => setEUnits(e.target.value)} aria-label="Units" disabled={h.type === 'coindcx' || h.source === 'kite'} />
+          <input inputMode="decimal" placeholder="Total amount invested (INR)" value={eInvested} onChange={e => setEInvested(e.target.value)} aria-label="Amount invested" disabled={h.source === 'kite'} />
+          {h.source === 'kite' && <small>This holding comes from Zerodha. Use Sync now to refresh it.</small>}
           {h.type === 'coindcx' && <small>Units come from CoinDCX. Add what you paid in total so profit can be shown.</small>}
           <div className="row">
-            <button className="primary" onClick={() => saveEdit(h)}>Save</button>
+            {h.source !== 'kite' && <button className="primary" onClick={() => saveEdit(h)}>Save</button>}
             <button onClick={() => setEditId(null)}>Cancel</button>
-            {h.type !== 'coindcx' && <button className="danger" onClick={() => remove(h)}>Delete</button>}
+            {h.type !== 'coindcx' && h.source !== 'kite' && <button className="danger" onClick={() => remove(h)}>Delete</button>}
           </div>
         </section>
       ) : (
@@ -496,7 +591,8 @@ function Tracker({ onLogout }: { onLogout: () => void }) {
   const [editId, setEditId] = useState<number | null>(null)
   const [toast, setToast] = useState<ToastState>(null)
   const [showSms, setShowSms] = useState(false)
-  const [tab, setTab] = useState<'expenses' | 'investments'>('expenses')
+  const kiteResult = new URLSearchParams(window.location.search).get('kite')
+  const [tab, setTab] = useState<'expenses' | 'investments'>(kiteResult ? 'investments' : 'expenses')
   const [category, setCategory] = useState(localStorage.getItem('lastCategory') || CATEGORIES[0])
   const toastTimer = useRef<ReturnType<typeof setTimeout>>(undefined)
   const reqId = useRef(0)
@@ -526,6 +622,11 @@ function Tracker({ onLogout }: { onLogout: () => void }) {
     }
   }, [month])
   useEffect(() => { load() }, [load])
+  useEffect(() => {
+    if (!kiteResult) return
+    window.history.replaceState({}, '', window.location.pathname)
+    showToast({ msg: kiteResult === 'ok' ? 'Zerodha connected' : 'Zerodha login did not complete. Please try again.' })
+  }, [kiteResult, showToast])
   useEffect(() => {
     const refresh = () => { if (document.visibilityState === 'visible') load(true) }
     const t = setInterval(refresh, 30000)
