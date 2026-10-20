@@ -1,0 +1,8 @@
+.env
+node_modules/
+dist/
+target/
+.idea/
+.vscode/
+.devin/mcp_config.local.json
+.devin/*.local.json

@@ -1,0 +1,31 @@
+services:
+  - type: web
+    name: my-app-backend
+    runtime: docker
+    plan: free
+    dockerfilePath: ./backend/Dockerfile
+    dockerContext: ./backend
+    healthCheckPath: /actuator/health
+    envVars:
+      - key: DB_URL
+        sync: false
+      - key: DB_USER
+        sync: false
+      - key: DB_PASS
+        sync: false
+      - key: JAVA_OPTS
+        value: -Xmx300m -XX:+UseSerialGC
+
+  - type: web
+    name: my-app-frontend
+    runtime: static
+    rootDir: frontend
+    buildCommand: npm install --legacy-peer-deps && npm run build
+    staticPublishPath: dist
+    routes:
+      - type: rewrite
+        source: /api/*
+        destination: https://my-app-backend.onrender.com/api/*
+      - type: rewrite
+        source: /*
+        destination: /index.html
