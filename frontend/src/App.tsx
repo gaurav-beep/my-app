@@ -308,8 +308,8 @@ function CoinDcxCard({ onChange, showToast }: { onChange: () => void; showToast:
       {open && !status.linked && (
         <form onSubmit={connect} className="form">
           <ol>
-            <li>On CoinDCX open Profile, then <b>API dashboard</b>, and create a key.</li>
-            <li>Allow <b>read-only</b> access only. Do not enable trading or withdrawals. Do not bind an IP address.</li>
+            <li>On the CoinDCX <b>website</b> (not the phone app), click your profile icon, then <b>Profile</b>, then <b>API Dashboard</b>, and create a new key.</li>
+            <li>CoinDCX does not offer a read-only option, so this key may also be able to trade. Only continue if you are comfortable with that, and revoke it any time from the same page. Do not bind an IP address.</li>
             <li>Paste the key and secret here. They are encrypted before being stored.</li>
           </ol>
           <input placeholder="API key" value={apiKey} onChange={e => setApiKey(e.target.value)} autoComplete="off" aria-label="API key" />
