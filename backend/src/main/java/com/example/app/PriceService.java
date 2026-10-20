@@ -29,13 +29,86 @@ class PriceService {
 
     private final RestClient mf = client("https://api.mfapi.in");
     private final RestClient gecko = client("https://api.coingecko.com/api/v3");
+    private final RestClient yahoo = client("https://query1.finance.yahoo.com");
+    private final RestClient dcx = client("https://api.coindcx.com");
     private final Map<String, Quote> cache = new ConcurrentHashMap<>();
+    private volatile Map<String, BigDecimal> dcxTickers = Map.of();
+    private volatile Instant dcxFetchedAt = Instant.EPOCH;
 
-    private static RestClient client(String baseUrl) {
+    static RestClient client(String baseUrl) {
         SimpleClientHttpRequestFactory f = new SimpleClientHttpRequestFactory();
         f.setConnectTimeout(5000);
         f.setReadTimeout(8000);
-        return RestClient.builder().baseUrl(baseUrl).requestFactory(f).build();
+        return RestClient.builder().baseUrl(baseUrl).requestFactory(f)
+            .defaultHeader("User-Agent", "Mozilla/5.0").build();
+    }
+
+    Optional<Quote> stock(String symbol) {
+        String key = "stock:" + symbol;
+        Quote cached = cache.get(key);
+        if (fresh(cached, CRYPTO_TTL)) return Optional.of(cached);
+        try {
+            JsonNode meta = yahoo.get().uri(u -> u.path("/v8/finance/chart/{s}").queryParam("range", "1d").queryParam("interval", "1d").build(symbol))
+                .retrieve().body(JsonNode.class).path("chart").path("result").path(0).path("meta");
+            if (meta.path("regularMarketPrice").isNumber() && "INR".equals(meta.path("currency").asText())) {
+                String asOf = meta.path("regularMarketTime").isNumber() ? Instant.ofEpochSecond(meta.path("regularMarketTime").asLong()).toString() : Instant.now().toString();
+                Quote q = new Quote(meta.path("regularMarketPrice").decimalValue(), asOf, Instant.now());
+                cache.put(key, q);
+                return Optional.of(q);
+            }
+        } catch (Exception e) {
+            log.warn("Stock price lookup failed for {}: {}", symbol, e.toString());
+        }
+        return Optional.ofNullable(cached);
+    }
+
+    List<Map<String, String>> searchStocks(String q) {
+        List<Map<String, String>> out = new ArrayList<>();
+        try {
+            JsonNode n = yahoo.get().uri(u -> u.path("/v1/finance/search").queryParam("q", q).queryParam("quotesCount", 15).queryParam("newsCount", 0).build())
+                .retrieve().body(JsonNode.class).path("quotes");
+            for (JsonNode x : n) {
+                String sym = x.path("symbol").asText();
+                String type = x.path("quoteType").asText();
+                if (out.size() >= 8) break;
+                if (!(sym.endsWith(".NS") || sym.endsWith(".BO")) || !(type.equals("EQUITY") || type.equals("ETF"))) continue;
+                String name = x.path("longname").asText(x.path("shortname").asText(sym));
+                out.add(Map.of("symbol", sym, "name", name + " (" + sym + ")"));
+            }
+        } catch (Exception e) {
+            log.warn("Stock search failed: {}", e.toString());
+        }
+        return out;
+    }
+
+    private synchronized Map<String, BigDecimal> dcxTicker() {
+        if (dcxFetchedAt.plusSeconds(60).isAfter(Instant.now())) return dcxTickers;
+        try {
+            JsonNode n = dcx.get().uri("/exchange/ticker").retrieve().body(JsonNode.class);
+            Map<String, BigDecimal> m = new HashMap<>();
+            for (JsonNode x : n) {
+                try {
+                    m.put(x.path("market").asText(), new BigDecimal(x.path("last_price").asText()));
+                } catch (NumberFormatException ignored) {
+                    // skip markets without a valid price
+                }
+            }
+            if (!m.isEmpty()) {
+                dcxTickers = m;
+                dcxFetchedAt = Instant.now();
+            }
+        } catch (Exception e) {
+            log.warn("CoinDCX ticker failed: {}", e.toString());
+        }
+        return dcxTickers;
+    }
+
+    Optional<Quote> coindcx(String currency) {
+        Map<String, BigDecimal> t = dcxTicker();
+        String c = currency.toUpperCase();
+        BigDecimal p = c.equals("USDT") ? t.get("USDTINR") : t.get(c + "INR");
+        if (p == null && t.get(c + "USDT") != null && t.get("USDTINR") != null) p = t.get(c + "USDT").multiply(t.get("USDTINR"));
+        return p == null ? Optional.empty() : Optional.of(new Quote(p, dcxFetchedAt.toString(), dcxFetchedAt));
     }
 
     private boolean fresh(Quote q, Duration ttl) {

@@ -24,7 +24,7 @@ public class Holding {
     @JsonIgnore
     @Column(name = "user_id")
     public Long userId;
-    @NotBlank @Pattern(regexp = "mf|crypto")
+    @NotBlank @Pattern(regexp = "mf|crypto|stock|coindcx")
     public String type;
     @NotBlank @Size(max = 64) @Pattern(regexp = "[A-Za-z0-9._-]+")
     public String symbol;
@@ -32,7 +32,7 @@ public class Holding {
     public String name;
     @NotNull @Positive
     public BigDecimal units;
-    @NotNull @PositiveOrZero
+    @PositiveOrZero
     public BigDecimal invested;
     @Column(name = "created_at", insertable = false, updatable = false)
     public LocalDateTime createdAt;
@@ -42,4 +42,6 @@ interface HoldingRepository extends JpaRepository<Holding, Long> {
     List<Holding> findByUserIdOrderByIdAsc(Long userId);
 
     Optional<Holding> findByIdAndUserId(Long id, Long userId);
+
+    List<Holding> findByUserIdAndType(Long userId, String type);
 }

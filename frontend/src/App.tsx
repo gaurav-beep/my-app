@@ -236,17 +236,17 @@ function SmsSetup() {
 }
 
 type HoldingRow = {
-  id: number; type: 'mf' | 'crypto'; symbol: string; name: string; units: number; invested: number
+  id: number; type: 'mf' | 'stock' | 'crypto' | 'coindcx'; symbol: string; name: string; units: number; invested: number | null
   price: number | null; value: number | null; gain: number | null; gainPct: number | null
 }
-type Portfolio = { holdings: HoldingRow[]; totalInvested: number; totalValue: number; complete: boolean }
+type Portfolio = { holdings: HoldingRow[]; totalInvested: number; totalValue: number; totalGain: number; unknownCost: number; complete: boolean }
 type Hit = { symbol: string; name: string }
 
 const signed = (n: number) => `${n >= 0 ? '+' : '-'}${money(Math.abs(n))}`
 const gainColor = (n: number | null) => (n == null ? undefined : n >= 0 ? '#16a34a' : 'var(--danger)')
 
 function AddHolding({ onAdded, showToast }: { onAdded: () => void; showToast: (t: { msg: string }) => void }) {
-  const [type, setType] = useState<'mf' | 'crypto'>('mf')
+  const [type, setType] = useState<'mf' | 'stock' | 'crypto'>('mf')
   const [q, setQ] = useState('')
   const [hits, setHits] = useState<Hit[]>([])
   const [searching, setSearching] = useState(false)
@@ -288,21 +288,99 @@ function AddHolding({ onAdded, showToast }: { onAdded: () => void; showToast: (t
     <form onSubmit={save} className="card form">
       <div className="tabs">
         <button type="button" className={type === 'mf' ? 'on' : ''} onClick={() => { setType('mf'); setPicked(null); setQ('') }}>Mutual fund</button>
+        <button type="button" className={type === 'stock' ? 'on' : ''} onClick={() => { setType('stock'); setPicked(null); setQ('') }}>Stock</button>
         <button type="button" className={type === 'crypto' ? 'on' : ''} onClick={() => { setType('crypto'); setPicked(null); setQ('') }}>Crypto</button>
       </div>
       {picked ? (
         <div className="kv"><strong>{picked.name}</strong><button type="button" onClick={() => setPicked(null)}>Change</button></div>
       ) : (
         <>
-          <input placeholder={type === 'mf' ? 'Search fund, e.g. Parag Parikh' : 'Search coin, e.g. Bitcoin'} value={q} onChange={e => setQ(e.target.value)} aria-label="Search" />
+          <input placeholder={type === 'mf' ? 'Search fund, e.g. Parag Parikh' : type === 'stock' ? 'Search NSE/BSE stock, e.g. Reliance' : 'Search coin, e.g. Bitcoin'} value={q} onChange={e => setQ(e.target.value)} aria-label="Search" />
           {searching && <p className="muted">Searching...</p>}
           {hits.map(h => <button type="button" key={h.symbol} className="hit" onClick={() => setPicked(h)}>{h.name}</button>)}
         </>
       )}
-      <input inputMode="decimal" placeholder={type === 'mf' ? 'Units held' : 'Quantity held'} value={units} onChange={e => setUnits(e.target.value)} aria-label="Units" />
+      <input inputMode="decimal" placeholder={type === 'mf' ? 'Units held' : type === 'stock' ? 'Shares held' : 'Quantity held'} value={units} onChange={e => setUnits(e.target.value)} aria-label="Units" />
       <input inputMode="decimal" placeholder="Total amount invested (INR)" value={invested} onChange={e => setInvested(e.target.value)} aria-label="Amount invested" />
       <button className="primary" disabled={busy}>{busy ? 'Saving...' : 'Add holding'}</button>
     </form>
+  )
+}
+
+function CoinDcxCard({ onChange, showToast }: { onChange: () => void; showToast: (t: { msg: string }) => void }) {
+  const [status, setStatus] = useState<{ available: boolean; linked: boolean } | null>(null)
+  const [open, setOpen] = useState(false)
+  const [apiKey, setApiKey] = useState('')
+  const [apiSecret, setApiSecret] = useState('')
+  const [busy, setBusy] = useState(false)
+
+  useEffect(() => {
+    api('/coindcx/status').then(r => r.json()).then(setStatus).catch(() => setStatus({ available: false, linked: false }))
+  }, [])
+
+  const run = async (path: string, init: RequestInit, ok: string) => {
+    setBusy(true)
+    try {
+      const res = await api(path, init)
+      if (!res.ok) {
+        const msg = res.status === 502 ? 'CoinDCX rejected the key. Check it and its permissions.' : res.status === 503 ? 'Not set up on the server yet.' : 'Something went wrong. Please try again.'
+        showToast({ msg })
+        return false
+      }
+      showToast({ msg: ok })
+      return true
+    } finally {
+      setBusy(false)
+    }
+  }
+
+  const connect = async (e: FormEvent) => {
+    e.preventDefault()
+    if (await run('/coindcx/key', { method: 'PUT', body: JSON.stringify({ apiKey, apiSecret }) }, 'CoinDCX connected')) {
+      setApiKey('')
+      setApiSecret('')
+      setOpen(false)
+      setStatus(s => s && { ...s, linked: true })
+      onChange()
+    }
+  }
+  const sync = async () => { if (await run('/coindcx/sync', { method: 'POST' }, 'CoinDCX synced')) onChange() }
+  const disconnect = async () => {
+    if (!window.confirm('Disconnect CoinDCX? This also removes the synced CoinDCX holdings from this app (nothing changes on CoinDCX).')) return
+    if (await run('/coindcx/key', { method: 'DELETE' }, 'CoinDCX disconnected')) {
+      setStatus(s => s && { ...s, linked: false })
+      onChange()
+    }
+  }
+
+  if (!status || !status.available) return null
+  return (
+    <section className="card setup">
+      <div className="kv">
+        <strong>CoinDCX</strong>
+        {status.linked ? (
+          <span className="row">
+            <button type="button" onClick={sync} disabled={busy}>{busy ? 'Syncing...' : 'Sync now'}</button>
+            <button type="button" className="danger" onClick={disconnect} disabled={busy}>Disconnect</button>
+          </span>
+        ) : (
+          <button type="button" onClick={() => setOpen(o => !o)}>{open ? 'Close' : 'Connect'}</button>
+        )}
+      </div>
+      {status.linked && <small className="muted">Balances are pulled from your CoinDCX account. Add what you paid so profit can be shown.</small>}
+      {open && !status.linked && (
+        <form onSubmit={connect} className="form">
+          <ol>
+            <li>On CoinDCX open Profile, then <b>API dashboard</b>, and create a key.</li>
+            <li>Allow <b>read-only</b> access only. Do not enable trading or withdrawals. Do not bind an IP address.</li>
+            <li>Paste the key and secret here. They are encrypted before being stored.</li>
+          </ol>
+          <input placeholder="API key" value={apiKey} onChange={e => setApiKey(e.target.value)} autoComplete="off" aria-label="API key" />
+          <input placeholder="API secret" type="password" value={apiSecret} onChange={e => setApiSecret(e.target.value)} autoComplete="off" aria-label="API secret" />
+          <button className="primary" disabled={busy || !apiKey || !apiSecret}>{busy ? 'Connecting...' : 'Connect and sync'}</button>
+        </form>
+      )}
+    </section>
   )
 }
 
@@ -333,11 +411,11 @@ function Investments({ showToast }: { showToast: (t: { msg: string; undo?: () =>
     return () => { clearInterval(t); document.removeEventListener('visibilitychange', refresh) }
   }, [load])
 
-  const startEdit = (h: HoldingRow) => { setEditId(h.id); setEUnits(String(h.units)); setEInvested(String(h.invested)) }
+  const startEdit = (h: HoldingRow) => { setEditId(h.id); setEUnits(String(h.units)); setEInvested(h.invested == null ? '' : String(h.invested)) }
   const saveEdit = async (h: HoldingRow) => {
     const u = Number(eUnits.replace(',', '.'))
     const i = Number(eInvested.replace(',', '.'))
-    if (!(u > 0) || !(i >= 0)) return showToast({ msg: 'Enter valid numbers' })
+    if (!(u > 0) || !(i >= 0) || eInvested.trim() === '') return showToast({ msg: 'Enter valid numbers' })
     const res = await api(`/holdings/${h.id}`, { method: 'PUT', body: JSON.stringify({ type: h.type, symbol: h.symbol, name: h.name, units: u, invested: i }) })
     if (!res.ok) return showToast({ msg: 'Could not save. Please try again.' })
     setEditId(null)
@@ -358,7 +436,7 @@ function Investments({ showToast }: { showToast: (t: { msg: string; undo?: () =>
     })
   }
 
-  const gain = data ? data.totalValue - data.totalInvested : 0
+  const gain = data ? data.totalGain : 0
   const pct = data && data.totalInvested > 0 ? (gain / data.totalInvested) * 100 : null
 
   return (
@@ -369,11 +447,14 @@ function Investments({ showToast }: { showToast: (t: { msg: string; undo?: () =>
         {data && (
           <div className="center">
             Invested {money(data.totalInvested)}
-            {data.holdings.length > 0 && <strong style={{ color: gainColor(gain), marginLeft: 8 }}>{signed(gain)}{pct != null ? ` (${pct.toFixed(2)}%)` : ''}</strong>}
+            {data.totalInvested > 0 && <strong style={{ color: gainColor(gain), marginLeft: 8 }}>{signed(gain)}{pct != null ? ` (${pct.toFixed(2)}%)` : ''}</strong>}
           </div>
         )}
+        {data && data.unknownCost > 0 && <p className="muted center">{data.unknownCost} holding(s) have no cost entered, so they are left out of profit and loss. Tap one to add it.</p>}
         {data && !data.complete && <p className="muted center">Some prices are unavailable right now. Those holdings are counted at the amount invested.</p>}
       </section>
+
+      <CoinDcxCard onChange={load} showToast={showToast} />
 
       <AddHolding onAdded={load} showToast={showToast} />
 
@@ -381,19 +462,20 @@ function Investments({ showToast }: { showToast: (t: { msg: string; undo?: () =>
       {data?.holdings.map(h => editId === h.id ? (
         <section key={h.id} className="card form">
           <strong>{h.name}</strong>
-          <input inputMode="decimal" value={eUnits} onChange={e => setEUnits(e.target.value)} aria-label="Units" />
-          <input inputMode="decimal" value={eInvested} onChange={e => setEInvested(e.target.value)} aria-label="Amount invested" />
+          <input inputMode="decimal" value={eUnits} onChange={e => setEUnits(e.target.value)} aria-label="Units" disabled={h.type === 'coindcx'} />
+          <input inputMode="decimal" placeholder="Total amount invested (INR)" value={eInvested} onChange={e => setEInvested(e.target.value)} aria-label="Amount invested" />
+          {h.type === 'coindcx' && <small>Units come from CoinDCX. Add what you paid in total so profit can be shown.</small>}
           <div className="row">
             <button className="primary" onClick={() => saveEdit(h)}>Save</button>
             <button onClick={() => setEditId(null)}>Cancel</button>
-            <button className="danger" onClick={() => remove(h)}>Delete</button>
+            {h.type !== 'coindcx' && <button className="danger" onClick={() => remove(h)}>Delete</button>}
           </div>
         </section>
       ) : (
         <button key={h.id} className="card item" onClick={() => startEdit(h)}>
           <span className="desc">
             <span>{h.name}</span>
-            <small>{h.units} {h.type === 'mf' ? 'units' : 'qty'} &middot; invested {money(h.invested)}</small>
+            <small>{h.units} {h.type === 'mf' ? 'units' : 'qty'} &middot; {h.invested == null ? 'add cost' : `invested ${money(h.invested)}`}</small>
           </span>
           <span className="right">
             <strong>{h.value != null ? money(h.value) : 'Price n/a'}</strong>
