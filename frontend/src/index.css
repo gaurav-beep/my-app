@@ -1,23 +1,97 @@
 :root {
+  --bg: #f6f7f9;
+  --card: #fff;
+  --text: #111827;
+  --muted: #6b7280;
+  --border: #e5e7eb;
+  --accent: #2563eb;
+  --danger: #dc2626;
   font: 16px/1.5 system-ui, 'Segoe UI', Roboto, sans-serif;
   color-scheme: light dark;
 }
 
+@media (prefers-color-scheme: dark) {
+  :root {
+    --bg: #0f1115;
+    --card: #1a1d24;
+    --text: #f3f4f6;
+    --muted: #9ca3af;
+    --border: #2a2e38;
+    --accent: #60a5fa;
+    --danger: #f87171;
+  }
+}
+
+* { box-sizing: border-box; }
+
 body {
   margin: 0;
+  background: var(--bg);
+  color: var(--text);
   padding: env(safe-area-inset-top) env(safe-area-inset-right) env(safe-area-inset-bottom) env(safe-area-inset-left);
 }
 
-h1 { font-size: 1.6rem; margin: 1rem 0; }
-h2 { font-size: 1.15rem; }
+h1 { font-size: 1.6rem; margin: 0 0 0.5rem; }
 
-input, select, button {
+input, button {
   font: inherit;
-  padding: 0.6rem 0.7rem;
-  box-sizing: border-box;
+  color: inherit;
   min-height: 44px;
+  padding: 0.5rem 0.75rem;
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  background: var(--card);
 }
 
+input:focus-visible, button:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
 button { cursor: pointer; }
-table { font-size: 0.95rem; }
-td { padding: 0.5rem 0.25rem; }
+button:disabled { opacity: 0.5; cursor: default; }
+small, .muted { color: var(--muted); }
+.center { text-align: center; }
+.error { color: var(--danger); margin: 0; }
+
+.app, .login { max-width: 560px; margin: 0 auto; padding: 1rem; display: grid; gap: 0.75rem; }
+.login { text-align: center; padding-top: 4rem; }
+.login p { margin: 0; }
+.gbtn { display: flex; justify-content: center; min-height: 44px; margin: 0.5rem 0; }
+
+.card { background: var(--card); border: 1px solid var(--border); border-radius: 14px; padding: 0.9rem; }
+.top { display: flex; justify-content: space-between; align-items: center; }
+.who { display: flex; align-items: center; gap: 0.5rem; font-weight: 600; }
+.who img { width: 32px; height: 32px; border-radius: 50%; }
+.link { border: 0; background: none; color: var(--accent); }
+
+.form { display: grid; gap: 0.6rem; }
+.form .amount { font-size: 1.8rem; font-weight: 700; text-align: center; min-height: 56px; }
+.chips { display: flex; flex-wrap: wrap; gap: 0.4rem; }
+.chip { border-radius: 999px; min-height: 38px; padding: 0.25rem 0.8rem; }
+.chip.on { background: var(--c); border-color: var(--c); color: #fff; }
+.row { display: flex; gap: 0.5rem; }
+.row .primary { flex: 1; background: var(--accent); border-color: var(--accent); color: #fff; font-weight: 600; }
+.danger { color: var(--danger); }
+
+.months { display: flex; justify-content: space-between; align-items: center; }
+.months button { width: 44px; font-size: 1.4rem; line-height: 1; }
+.grand { font-size: 2rem; font-weight: 700; text-align: center; margin: 0.25rem 0 0.5rem; min-height: 3rem; }
+.cat { display: grid; grid-template-columns: 12px 1fr auto; gap: 0.2rem 0.5rem; align-items: center; margin-top: 0.4rem; }
+.cat .bar { grid-column: 1 / -1; height: 6px; background: var(--border); border-radius: 3px; overflow: hidden; }
+.cat .bar i { display: block; height: 100%; }
+.dot { width: 12px; height: 12px; border-radius: 50%; flex: none; }
+
+.item { display: flex; align-items: center; gap: 0.75rem; width: 100%; text-align: left; min-height: 60px; }
+.item .desc { flex: 1; display: grid; min-width: 0; }
+.item .desc span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+
+.toast {
+  position: fixed; left: 50%; bottom: calc(1rem + env(safe-area-inset-bottom)); transform: translateX(-50%);
+  display: flex; align-items: center; gap: 1rem; padding: 0.6rem 1rem; border-radius: 12px;
+  background: #1f2937; color: #fff; box-shadow: 0 6px 20px rgba(0, 0, 0, 0.3);
+}
+.toast button { background: none; border: 0; color: #93c5fd; font-weight: 600; min-height: 32px; }
+
+.skeleton { display: block; background: linear-gradient(90deg, var(--border), transparent, var(--border)); background-size: 200% 100%; animation: sk 1.2s infinite; border-radius: 8px; }
+.skeleton.w60 { width: 60%; height: 2rem; margin: 0 auto; }
+.skeleton.h56 { height: 60px; }
+@keyframes sk { to { background-position: -200% 0; } }
+
+@media (prefers-reduced-motion: reduce) { .skeleton { animation: none; } }
