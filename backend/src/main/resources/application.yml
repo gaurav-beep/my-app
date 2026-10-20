@@ -10,6 +10,7 @@ app:
   jwt-secret: ${APP_JWT_SECRET}
   google-client-id: ${GOOGLE_CLIENT_ID:}
   token-key: ${TOKEN_ENCRYPTION_KEY:}
+  casparser-key: ${CASPARSER_API_KEY:}
 management:
   endpoints:
     web:

@@ -24,7 +24,7 @@ public class Holding {
     @JsonIgnore
     @Column(name = "user_id")
     public Long userId;
-    @NotBlank @Pattern(regexp = "mf|crypto|stock|coindcx|kitemf")
+    @NotBlank @Pattern(regexp = "mf|crypto|stock|coindcx|kitemf|cas")
     public String type;
     @NotBlank @Size(max = 64) @Pattern(regexp = "[A-Za-z0-9._&-]+")
     public String symbol;

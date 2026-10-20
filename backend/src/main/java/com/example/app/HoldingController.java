@@ -61,7 +61,7 @@ class HoldingController {
             case "mf" -> prices.mfNav(h.symbol);
             case "stock" -> prices.stock(h.symbol);
             case "coindcx" -> prices.coindcx(h.symbol);
-            case "kitemf" -> Optional.empty();
+            case "kitemf", "cas" -> Optional.empty();
             default -> Optional.ofNullable(crypto.get(h.symbol));
         };
         if (live.isEmpty() && h.snapPrice != null && h.snapPrice.signum() > 0) {
@@ -81,7 +81,7 @@ class HoldingController {
     @PostMapping("/holdings") @ResponseStatus(HttpStatus.CREATED)
     Long create(@AuthenticationPrincipal Jwt jwt, @Valid @RequestBody Holding h) {
         if (h.invested == null) throw new ResponseStatusException(HttpStatus.BAD_REQUEST, "invested is required");
-        if (h.type.equals("kitemf")) throw new ResponseStatusException(HttpStatus.BAD_REQUEST, "unsupported type");
+        if (h.type.equals("kitemf") || h.type.equals("cas")) throw new ResponseStatusException(HttpStatus.BAD_REQUEST, "unsupported type");
         h.id = null;
         h.userId = uid(jwt);
         h.source = "manual";
@@ -95,7 +95,7 @@ class HoldingController {
         if (h.invested == null) throw new ResponseStatusException(HttpStatus.BAD_REQUEST, "invested is required");
         Holding x = owned(id, jwt);
         if ("kite".equals(x.source)) return;
-        if (!"coindcx".equals(x.type)) x.units = h.units;
+        if (!"coindcx".equals(x.type) && !"cas".equals(x.source)) x.units = h.units;
         x.invested = h.invested;
         repo.save(x);
     }

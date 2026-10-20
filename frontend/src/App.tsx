@@ -236,7 +236,7 @@ function SmsSetup() {
 }
 
 type HoldingRow = {
-  id: number; type: 'mf' | 'stock' | 'crypto' | 'coindcx' | 'kitemf'; source?: string; symbol: string; name: string; units: number; invested: number | null
+  id: number; type: 'mf' | 'stock' | 'crypto' | 'coindcx' | 'kitemf' | 'cas'; source?: string; symbol: string; name: string; units: number; invested: number | null
   price: number | null; value: number | null; gain: number | null; gainPct: number | null
 }
 type Portfolio = { holdings: HoldingRow[]; totalInvested: number; totalValue: number; totalGain: number; unknownCost: number; complete: boolean }
@@ -413,6 +413,89 @@ function KiteCard({ onChange, showToast }: { onChange: () => void; showToast: (t
   )
 }
 
+function CasCard({ onChange, showToast }: { onChange: () => void; showToast: (t: { msg: string }) => void }) {
+  const [available, setAvailable] = useState(false)
+  const [open, setOpen] = useState(false)
+  const [pan, setPan] = useState('')
+  const [boId, setBoId] = useState('')
+  const [dob, setDob] = useState('')
+  const [otp, setOtp] = useState('')
+  const [sessionId, setSessionId] = useState('')
+  const [busy, setBusy] = useState(false)
+  const [error, setError] = useState('')
+
+  useEffect(() => {
+    api('/cas/status').then(r => r.json()).then(d => setAvailable(!!d.available)).catch(() => setAvailable(false))
+  }, [])
+
+  const fail = async (res: Response) => {
+    let msg = 'Something went wrong. Please try again.'
+    try { msg = (await res.json()).message || msg } catch { /* keep generic message */ }
+    setError(msg)
+  }
+  const reset = () => { setSessionId(''); setOtp(''); setPan(''); setBoId(''); setDob(''); setOpen(false) }
+
+  const start = async (e: FormEvent) => {
+    e.preventDefault()
+    setBusy(true)
+    setError('')
+    try {
+      const res = await api('/cas/cdsl/start', { method: 'POST', body: JSON.stringify({ pan: pan.trim(), boId: boId.trim(), dob }) })
+      if (!res.ok) return await fail(res)
+      setSessionId((await res.json()).sessionId)
+    } catch {
+      setError('Could not reach the server. Please try again.')
+    } finally {
+      setBusy(false)
+    }
+  }
+
+  const verify = async (e: FormEvent) => {
+    e.preventDefault()
+    setBusy(true)
+    setError('')
+    try {
+      const res = await api('/cas/cdsl/verify', { method: 'POST', body: JSON.stringify({ sessionId, otp: otp.trim(), pan: pan.trim() }) })
+      if (!res.ok) return await fail(res)
+      showToast({ msg: 'Demat holdings loaded' })
+      reset()
+      onChange()
+    } catch {
+      setError('Could not reach the server. Please try again.')
+    } finally {
+      setBusy(false)
+    }
+  }
+
+  if (!available) return null
+  return (
+    <section className="card setup">
+      <div className="kv">
+        <strong>Demat statement (CDSL / NSDL)</strong>
+        <button type="button" onClick={() => { setOpen(o => !o); setError('') }}>{open ? 'Close' : 'Load holdings'}</button>
+      </div>
+      {!open && <small className="muted">Loads stocks and funds from all your brokers using your CDSL statement and a phone OTP.</small>}
+      {open && !sessionId && (
+        <form onSubmit={start} className="form">
+          <small>Your PAN, client ID and date of birth are sent only to fetch the statement and are not saved. You need at least one CDSL demat account. The statement also lists NSDL holdings.</small>
+          <input placeholder="PAN" value={pan} onChange={e => setPan(e.target.value.toUpperCase())} maxLength={10} autoComplete="off" aria-label="PAN" />
+          <input placeholder="16-digit CDSL client ID" inputMode="numeric" value={boId} onChange={e => setBoId(e.target.value.replace(/\D/g, ''))} maxLength={16} autoComplete="off" aria-label="CDSL client ID" />
+          <input type="date" value={dob} onChange={e => setDob(e.target.value)} aria-label="Date of birth" />
+          <button className="primary" disabled={busy || pan.length !== 10 || boId.length !== 16 || !dob}>{busy ? 'Sending OTP (up to 30 seconds)...' : 'Send OTP'}</button>
+        </form>
+      )}
+      {open && sessionId && (
+        <form onSubmit={verify} className="form">
+          <small>Enter the OTP CDSL sent to your registered mobile number.</small>
+          <input placeholder="OTP" inputMode="numeric" value={otp} onChange={e => setOtp(e.target.value.replace(/\D/g, ''))} maxLength={8} autoComplete="one-time-code" aria-label="OTP" />
+          <button className="primary" disabled={busy || otp.length < 4}>{busy ? 'Loading holdings...' : 'Load holdings'}</button>
+        </form>
+      )}
+      {error && <p className="error">{error}</p>}
+    </section>
+  )
+}
+
 function Investments({ showToast }: { showToast: (t: { msg: string; undo?: () => void }) => void }) {
   const [data, setData] = useState<Portfolio | null>(null)
   const [loading, setLoading] = useState(true)
@@ -483,6 +566,8 @@ function Investments({ showToast }: { showToast: (t: { msg: string; undo?: () =>
         {data && !data.complete && <p className="muted center">Some prices are unavailable right now. Those holdings are counted at the amount invested.</p>}
       </section>
 
+      <CasCard onChange={load} showToast={showToast} />
+
       <KiteCard onChange={load} showToast={showToast} />
 
       <CoinDcxCard onChange={load} showToast={showToast} />
@@ -491,9 +576,10 @@ function Investments({ showToast }: { showToast: (t: { msg: string; undo?: () =>
       {data?.holdings.map(h => editId === h.id ? (
         <section key={h.id} className="card form">
           <strong>{h.name}</strong>
-          <input inputMode="decimal" value={eUnits} onChange={e => setEUnits(e.target.value)} aria-label="Units" disabled={h.type === 'coindcx' || h.source === 'kite'} />
+          <input inputMode="decimal" value={eUnits} onChange={e => setEUnits(e.target.value)} aria-label="Units" disabled={h.type === 'coindcx' || h.source === 'kite' || h.source === 'cas'} />
           <input inputMode="decimal" placeholder="Total amount invested (INR)" value={eInvested} onChange={e => setEInvested(e.target.value)} aria-label="Amount invested" disabled={h.source === 'kite'} />
           {h.source === 'kite' && <small>This holding comes from Zerodha. Use Sync now to refresh it.</small>}
+          {h.source === 'cas' && <small>Units and value come from your demat statement. Add what you paid in total to see profit.</small>}
           {h.type === 'coindcx' && <small>Units come from CoinDCX. Add what you paid in total so profit can be shown.</small>}
           <div className="row">
             {h.source !== 'kite' && <button className="primary" onClick={() => saveEdit(h)}>Save</button>}
@@ -505,7 +591,7 @@ function Investments({ showToast }: { showToast: (t: { msg: string; undo?: () =>
         <button key={h.id} className="card item" onClick={() => startEdit(h)}>
           <span className="desc">
             <span>{h.name}</span>
-            <small>{h.units} {h.type === 'mf' ? 'units' : 'qty'} &middot; {h.invested == null ? 'add cost' : `invested ${money(h.invested)}`}</small>
+            <small>{h.units} {h.type === 'mf' ? 'units' : 'qty'} &middot; {h.invested == null ? 'add cost' : `invested ${money(h.invested)}`}{h.source === 'cas' ? ' \u00b7 statement value' : ''}</small>
           </span>
           <span className="right">
             <strong>{h.value != null ? money(h.value) : 'Price n/a'}</strong>
