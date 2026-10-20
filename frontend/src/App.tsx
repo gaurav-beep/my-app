@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useRef, useState, type FormEvent } from 'react'
 
-type Expense = { id: number; description: string; amount: number; category: string; spentOn: string }
+type Expense = { id: number; description: string; amount: number; category: string; spentOn: string; source?: string }
 type Total = { category: string; total: number }
 type UserInfo = { name?: string; email?: string; picture?: string }
 type Values = { amount: string; description: string; category: string; spentOn: string }
@@ -177,6 +177,64 @@ function EntryForm({ initial, label, focus, onSubmit, onCancel, onDelete }: {
   )
 }
 
+function SmsSetup() {
+  const [enabled, setEnabled] = useState<boolean | null>(null)
+  const [token, setToken] = useState('')
+  const [copied, setCopied] = useState('')
+  const url = `${window.location.origin}/api/ingest/sms`
+
+  useEffect(() => {
+    api('/ingest/status').then(r => r.json()).then(d => setEnabled(d.enabled)).catch(() => setEnabled(false))
+  }, [])
+
+  const create = async () => {
+    const r = await api('/ingest/token', { method: 'POST' })
+    if (r.ok) {
+      setToken((await r.json()).token)
+      setEnabled(true)
+    }
+  }
+  const revoke = async () => {
+    await api('/ingest/token', { method: 'DELETE' })
+    setToken('')
+    setEnabled(false)
+  }
+  const copy = async (label: string, text: string) => {
+    await navigator.clipboard.writeText(text)
+    setCopied(label)
+    setTimeout(() => setCopied(''), 1500)
+  }
+
+  return (
+    <section className="card setup">
+      <strong>Auto-add expenses from bank SMS (Android)</strong>
+      <p className="muted">
+        Your phone forwards each bank debit SMS to this app, and it appears here within seconds. Credits, OTPs and failed
+        payments are ignored. Duplicates are skipped.
+      </p>
+      <ol>
+        <li>Install the free <b>MacroDroid</b> app and allow SMS access.</li>
+        <li>New macro, trigger: <b>SMS Received</b> (any number, or just your bank), content contains <b>debited</b>, <b>spent</b> or <b>paid</b>.</li>
+        <li>Action: <b>HTTP Request</b>, method <b>POST</b>, content type <b>text/plain</b>, body <code>{'{sms_message}'}</code>.</li>
+        <li>Use the URL and add the header <code>X-Ingest-Token</code> with your key, both shown below.</li>
+      </ol>
+      <div className="kv"><code>{url}</code><button type="button" onClick={() => copy('url', url)}>{copied === 'url' ? 'Copied' : 'Copy URL'}</button></div>
+      {token ? (
+        <>
+          <div className="kv"><code>{token}</code><button type="button" onClick={() => copy('key', token)}>{copied === 'key' ? 'Copied' : 'Copy key'}</button></div>
+          <p className="muted">Save this key now. It is shown only once.</p>
+        </>
+      ) : (
+        <p className="muted">{enabled === null ? 'Checking...' : enabled ? 'A key is active. Generate a new one to replace it.' : 'No key yet.'}</p>
+      )}
+      <div className="row">
+        <button type="button" className="primary" onClick={create}>{enabled ? 'Generate new key' : 'Generate key'}</button>
+        {enabled && <button type="button" className="danger" onClick={revoke}>Turn off</button>}
+      </div>
+    </section>
+  )
+}
+
 function Tracker({ onLogout }: { onLogout: () => void }) {
   const [month, setMonth] = useState(today().slice(0, 7))
   const [expenses, setExpenses] = useState<Expense[] | null>(null)
@@ -184,6 +242,7 @@ function Tracker({ onLogout }: { onLogout: () => void }) {
   const [loading, setLoading] = useState(true)
   const [editId, setEditId] = useState<number | null>(null)
   const [toast, setToast] = useState<ToastState>(null)
+  const [showSms, setShowSms] = useState(false)
   const [category, setCategory] = useState(localStorage.getItem('lastCategory') || CATEGORIES[0])
   const toastTimer = useRef<ReturnType<typeof setTimeout>>(undefined)
   const reqId = useRef(0)
@@ -196,9 +255,9 @@ function Tracker({ onLogout }: { onLogout: () => void }) {
     toastTimer.current = setTimeout(() => setToast(null), 6000)
   }
 
-  const load = useCallback(async () => {
+  const load = useCallback(async (silent = false) => {
     const id = ++reqId.current
-    setLoading(true)
+    if (!silent) setLoading(true)
     try {
       const [a, b] = await Promise.all([api(`/expenses?month=${month}`), api(`/expenses/summary?month=${month}`)])
       if (id !== reqId.current) return
@@ -207,12 +266,18 @@ function Tracker({ onLogout }: { onLogout: () => void }) {
         setTotals(await b.json())
       }
     } catch {
-      if (id === reqId.current) showToast({ msg: 'Could not load. Check your connection.' })
+      if (id === reqId.current && !silent) showToast({ msg: 'Could not load. Check your connection.' })
     } finally {
-      if (id === reqId.current) setLoading(false)
+      if (id === reqId.current && !silent) setLoading(false)
     }
   }, [month])
   useEffect(() => { load() }, [load])
+  useEffect(() => {
+    const refresh = () => { if (document.visibilityState === 'visible') load(true) }
+    const t = setInterval(refresh, 30000)
+    document.addEventListener('visibilitychange', refresh)
+    return () => { clearInterval(t); document.removeEventListener('visibilitychange', refresh) }
+  }, [load])
 
   const payload = (v: Values) => ({
     description: v.description.trim() || v.category,
@@ -274,8 +339,12 @@ function Tracker({ onLogout }: { onLogout: () => void }) {
           {user.picture && <img src={user.picture} alt="" referrerPolicy="no-referrer" />}
           <span>{user.name || user.email}</span>
         </div>
-        <button className="link" onClick={() => { clearSession(); onLogout() }}>Sign out</button>
+        <div>
+          <button className="link" onClick={() => setShowSms(s => !s)}>Auto-add</button>
+          <button className="link" onClick={() => { clearSession(); onLogout() }}>Sign out</button>
+        </div>
       </header>
+      {showSms && <SmsSetup />}
 
       <EntryForm label="Add expense" focus initial={{ amount: '', description: '', category, spentOn: today() }} onSubmit={add} />
 
@@ -308,7 +377,7 @@ function Tracker({ onLogout }: { onLogout: () => void }) {
           <span className="dot" style={{ background: COLORS[x.category] || COLORS.Other }} />
           <span className="desc">
             <span>{x.description}</span>
-            <small>{x.category} &middot; {new Date(`${x.spentOn}T00:00`).toLocaleDateString(undefined, { day: 'numeric', month: 'short' })}</small>
+            <small>{x.category} &middot; {x.source === 'sms' ? 'auto \u00b7 ' : ''}{new Date(`${x.spentOn}T00:00`).toLocaleDateString(undefined, { day: 'numeric', month: 'short' })}</small>
           </span>
           <strong>{money(Number(x.amount))}</strong>
         </button>

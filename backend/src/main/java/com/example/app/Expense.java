@@ -28,6 +28,10 @@ public class Expense {
     @JsonIgnore
     @Column(name = "user_id")
     public Long userId;
+    @JsonIgnore
+    @Column(name = "external_ref")
+    public String externalRef;
+    public String source = "manual";
     @Column(name = "created_at", insertable = false, updatable = false)
     public LocalDateTime createdAt;
 }

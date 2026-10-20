@@ -16,8 +16,12 @@ public class AppUser {
     public String email;
     public String name;
     public String picture;
+    @Column(name = "ingest_token_hash")
+    public String ingestTokenHash;
 }
 
 interface AppUserRepository extends JpaRepository<AppUser, Long> {
     Optional<AppUser> findByGoogleSub(String googleSub);
+
+    Optional<AppUser> findByIngestTokenHash(String ingestTokenHash);
 }

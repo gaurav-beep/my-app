@@ -21,6 +21,8 @@ interface ExpenseRepository extends JpaRepository<Expense, Long> {
 
     Optional<Expense> findByIdAndUserId(Long id, Long userId);
 
+    boolean existsByUserIdAndExternalRef(Long userId, String externalRef);
+
     @Query("select e.category as category, sum(e.amount) as total from Expense e where e.userId = ?1 and e.spentOn between ?2 and ?3 group by e.category order by sum(e.amount) desc")
     List<CategoryTotal> totals(Long userId, LocalDate from, LocalDate to);
 }
@@ -67,6 +69,8 @@ class ExpenseController {
     Expense create(@AuthenticationPrincipal Jwt jwt, @Valid @RequestBody Expense e) {
         e.id = null;
         e.userId = uid(jwt);
+        e.source = "manual";
+        e.externalRef = null;
         return repo.save(e);
     }
 
