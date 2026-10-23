@@ -312,7 +312,7 @@ class PaperEngine {
     String decide(PaperAccount a, LocalDate today, boolean manual) {
         if (!llm.enabled()) return "The AI is not set up on the server yet.";
         LocalDateTime nowUtc = LocalDateTime.now(ZoneOffset.UTC);
-        if (a.lastAttemptAt != null && a.lastAttemptAt.isAfter(nowUtc.minusMinutes(manual ? 10 : 60))) return "Tried recently. Please wait a bit.";
+        if (a.lastAttemptAt != null && a.lastAttemptAt.isAfter(nowUtc.minusMinutes(manual ? 2 : 60))) return "Tried recently. Please wait a bit.";
         if (today.equals(a.lastDecisionOn)) return "Already decided for today.";
         a.lastAttemptAt = nowUtc;
         accounts.save(a);
@@ -331,7 +331,7 @@ class PaperEngine {
         List<PaperPosition> pos = positions.findByUserId(a.userId);
         BigDecimal equity = equity(a, pos);
         Optional<JsonNode> reply = llm.generateJson(buildPrompt(a, pos, bars, equity));
-        if (reply.isEmpty()) return "The AI did not answer. It will try again later.";
+        if (reply.isEmpty()) return "The AI is busy or did not answer. Try again in a few minutes.";
 
         for (PaperOrder stale : orders.findByUserIdAndStatus(a.userId, "PENDING")) {
             stale.status = "CANCELLED";
