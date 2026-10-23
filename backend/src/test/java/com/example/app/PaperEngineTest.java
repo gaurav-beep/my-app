@@ -82,6 +82,14 @@ class PaperEngineTest {
     }
 
     @Test
+    void amountMustBeWithinLimits() {
+        assertEquals(new BigDecimal("25000.00"), PaperEngine.checkAmount(new BigDecimal("25000")));
+        assertThrows(org.springframework.web.server.ResponseStatusException.class, () -> PaperEngine.checkAmount(new BigDecimal("999")));
+        assertThrows(org.springframework.web.server.ResponseStatusException.class, () -> PaperEngine.checkAmount(new BigDecimal("10000001")));
+        assertThrows(org.springframework.web.server.ResponseStatusException.class, () -> PaperEngine.checkAmount(null));
+    }
+
+    @Test
     void stripsMarkdownFencesFromModelOutput() {
         assertEquals("{\"a\":1}", LlmClient.stripFences("```json\n{\"a\":1}\n```"));
         assertEquals("{\"a\":1}", LlmClient.stripFences("{\"a\":1}"));

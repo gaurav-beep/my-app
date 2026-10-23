@@ -108,15 +108,30 @@ class AuthController {
         user.picture = google.getClaimAsString("picture");
         user = users.save(user);
 
-        Instant now = Instant.now();
-        JwtClaimsSet claims = JwtClaimsSet.builder()
-            .subject(String.valueOf(user.id)).issuedAt(now).expiresAt(now.plus(7, ChronoUnit.DAYS)).build();
-        String token = encoder.encode(JwtEncoderParameters.from(JwsHeader.with(MacAlgorithm.HS256).build(), claims)).getTokenValue();
-
         Map<String, Object> profile = new LinkedHashMap<>();
         profile.put("email", user.email);
         profile.put("name", user.name);
         profile.put("picture", user.picture);
-        return Map.of("token", token, "user", profile);
+        return Map.of("token", issue(encoder, String.valueOf(user.id)), "user", profile);
+    }
+
+    static String issue(JwtEncoder encoder, String subject) {
+        Instant now = Instant.now();
+        JwtClaimsSet claims = JwtClaimsSet.builder()
+            .subject(subject).issuedAt(now).expiresAt(now.plus(30, ChronoUnit.DAYS)).build();
+        return encoder.encode(JwtEncoderParameters.from(JwsHeader.with(MacAlgorithm.HS256).build(), claims)).getTokenValue();
+    }
+}
+
+@RestController
+@RequestMapping("/api/session")
+class SessionController {
+    private final JwtEncoder encoder;
+
+    SessionController(JwtEncoder encoder) { this.encoder = encoder; }
+
+    @PostMapping("/refresh")
+    Map<String, String> refresh(@org.springframework.security.core.annotation.AuthenticationPrincipal Jwt jwt) {
+        return Map.of("token", AuthController.issue(encoder, jwt.getSubject()));
     }
 }

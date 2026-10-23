@@ -609,7 +609,7 @@ type PaperView = {
   positions: { symbol: string; qty: number; avgCost: number; price: number | null; value: number | null; pnl: number | null }[]
   orders: { id: number; symbol: string; side: string; qty: number; status: string; reason: string | null; decidedOn: string; fillPrice: number | null; fees: number | null }[]
   history: { day: string; equity: number; benchmark: number | null }[]
-  lastSummary: string | null; lastDecisionOn: string | null
+  lastSummary: string | null; lastDecisionOn: string | null; autoTrade: boolean
 }
 
 function Chart({ view }: { view: PaperView }) {
@@ -640,6 +640,8 @@ function PaperTrading({ showToast }: { showToast: (t: { msg: string }) => void }
   const [status, setStatus] = useState<{ available: boolean; started: boolean } | null>(null)
   const [view, setView] = useState<PaperView | null>(null)
   const [busy, setBusy] = useState(false)
+  const [amount, setAmount] = useState('10000')
+  const [extra, setExtra] = useState('')
 
   const load = useCallback(async () => {
     const st = await (await api('/paper/status')).json()
@@ -653,11 +655,14 @@ function PaperTrading({ showToast }: { showToast: (t: { msg: string }) => void }
   }, [])
   useEffect(() => { load().catch(() => setStatus({ available: false, started: false })) }, [load])
 
-  const act = async (path: string, ok?: string) => {
+  const act = async (path: string, ok?: string, body?: object) => {
     setBusy(true)
     try {
-      const res = await api(path, { method: 'POST' })
-      if (!res.ok) return showToast({ msg: 'Something went wrong. Please try again.' })
+      const res = await api(path, { method: 'POST', ...(body ? { body: JSON.stringify(body) } : {}) })
+      if (!res.ok) {
+        const msg = res.status === 400 ? 'Enter an amount between 1,000 and 1,00,00,000.' : 'Something went wrong. Please try again.'
+        return showToast({ msg })
+      }
       const msg = ok ?? (await res.json().catch(() => ({}))).message
       if (msg) showToast({ msg })
       await load()
@@ -677,9 +682,11 @@ function PaperTrading({ showToast }: { showToast: (t: { msg: string }) => void }
     return (
       <section className="card form">
         <strong>AI paper trading</strong>
-        <p className="muted">You get a virtual {money(10000)} rupees. Once a day after the market closes, an AI looks at recent prices of 14 large Indian stocks and a Nifty ETF and places simulated orders, which fill at the next day&apos;s opening price with realistic costs. No real money is ever used.</p>
+        <p className="muted">You choose a virtual amount to start with. Once a day after the market closes, an AI looks at recent prices of 14 large Indian stocks and a Nifty ETF and places simulated orders, which fill at the next day&apos;s opening price with realistic costs. No real money is ever used.</p>
         <p className="muted">This is a simulation for learning, not investment advice. AI results are unreliable, and the point is to see honestly how it does against just holding the Nifty. Market prices come from Yahoo and the AI is Google Gemini, whose free tier may use prompts to improve Google products.</p>
-        <button className="primary" disabled={busy} onClick={() => act('/paper/start', 'Paper account created')}>{busy ? 'Starting...' : 'Start with 10,000 virtual rupees'}</button>
+        <input inputMode="decimal" value={amount} onChange={e => setAmount(e.target.value.replace(/[^0-9.]/g, ''))} placeholder="Virtual amount in rupees" aria-label="Starting amount" />
+        <small className="muted">Any amount from 1,000 to 1,00,00,000 rupees. You can add more later.</small>
+        <button className="primary" disabled={busy || !amount} onClick={() => act('/paper/start', 'Paper account created', { amount: Number(amount) })}>{busy ? 'Starting...' : 'Start paper account'}</button>
       </section>
     )
   }
@@ -706,8 +713,32 @@ function PaperTrading({ showToast }: { showToast: (t: { msg: string }) => void }
           <button type="button" className="primary" disabled={busy} onClick={() => act('/paper/run')}>{busy ? 'Asking the AI...' : 'Run AI now'}</button>
           <button type="button" className="danger" disabled={busy} onClick={reset}>Reset</button>
         </div>
-        <small className="muted">Decided orders fill at the next trading day&apos;s open. The server must be awake at that time, so this works best with the keep-awake monitor.</small>
+        <label className="row" style={{ alignItems: 'center' }}>
+          <input type="checkbox" checked={view.autoTrade} disabled={busy} onChange={e => act('/paper/auto', e.target.checked ? 'Auto-trading on' : 'Auto-trading off', { enabled: e.target.checked })} style={{ minHeight: 'auto', width: 20, height: 20 }} />
+          <span>Auto-trade: AI orders go through without asking me</span>
+        </label>
+        <small className="muted">{view.autoTrade ? 'Orders the AI decides fill automatically at the next trading day\'s open.' : 'With auto-trade off, the AI only suggests trades. You approve or decline each one.'}</small>
+        <div className="row">
+          <input inputMode="decimal" value={extra} onChange={e => setExtra(e.target.value.replace(/[^0-9.]/g, ''))} placeholder="Add virtual cash" aria-label="Add virtual cash" style={{ flex: 1 }} />
+          <button type="button" disabled={busy || !extra} onClick={async () => { await act('/paper/deposit', 'Cash added', { amount: Number(extra) }); setExtra('') }}>Add</button>
+        </div>
+        <small className="muted">Added cash counts as capital you put in, so return percentages stay fair, but comparing with the Nifty becomes approximate. The server must be awake at the next open for orders to fill, so this works best with the keep-awake monitor.</small>
       </section>
+
+      {view.orders.some(o => o.status === 'SUGGESTED') && <strong>AI suggestions for you</strong>}
+      {view.orders.filter(o => o.status === 'SUGGESTED').map(o => (
+        <div key={o.id} className="card form">
+          <div className="kv">
+            <strong>{o.side === 'BUY' ? 'Buy' : 'Sell'} {o.qty} {o.symbol.replace('.NS', '')}</strong>
+            <small className="muted">{o.decidedOn}</small>
+          </div>
+          {o.reason && <small className="muted">{o.reason}</small>}
+          <div className="row">
+            <button type="button" className="primary" disabled={busy} onClick={() => act(`/paper/orders/${o.id}/approve`, 'Approved. It fills at the next open.')}>Approve</button>
+            <button type="button" disabled={busy} onClick={() => act(`/paper/orders/${o.id}/decline`, 'Declined')}>Decline</button>
+          </div>
+        </div>
+      ))}
 
       {view.positions.map(p => (
         <div key={p.symbol} className="card item">
@@ -721,7 +752,7 @@ function PaperTrading({ showToast }: { showToast: (t: { msg: string }) => void }
       {view.positions.length === 0 && <p className="muted center">No open positions.</p>}
 
       {view.orders.length > 0 && <strong>Recent orders</strong>}
-      {view.orders.map(o => (
+      {view.orders.filter(o => o.status !== 'SUGGESTED').map(o => (
         <div key={o.id} className="card">
           <div className="kv">
             <strong>{o.side} {o.qty} {o.symbol.replace('.NS', '')}</strong>
@@ -910,6 +941,13 @@ function Tracker({ onLogout }: { onLogout: () => void }) {
 
 export default function App() {
   const [authed, setAuthed] = useState(!!localStorage.getItem('token'))
+  useEffect(() => {
+    if (!localStorage.getItem('token')) return
+    api('/session/refresh', { method: 'POST' })
+      .then(r => (r.ok ? r.json() : null))
+      .then(d => { if (d?.token) localStorage.setItem('token', d.token) })
+      .catch(() => { /* keep the current token if the server is waking up */ })
+  }, [])
   const onLogin = useCallback(() => setAuthed(true), [])
   return authed ? <Tracker onLogout={() => setAuthed(false)} /> : <Login onLogin={onLogin} />
 }

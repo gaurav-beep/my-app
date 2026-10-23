@@ -53,6 +53,8 @@ class PaperAccount {
     LocalDateTime lastAttemptAt;
     @Column(name = "last_summary")
     String lastSummary;
+    @Column(name = "auto_trade")
+    boolean autoTrade;
 }
 
 @Entity
@@ -237,15 +239,54 @@ class PaperEngine {
         return e.setScale(2, RoundingMode.HALF_UP);
     }
 
-    PaperAccount start(Long userId) {
+    static final BigDecimal MIN_AMOUNT = new BigDecimal("1000");
+    static final BigDecimal MAX_AMOUNT = new BigDecimal("10000000");
+
+    static BigDecimal checkAmount(BigDecimal amount) {
+        if (amount == null || amount.compareTo(MIN_AMOUNT) < 0 || amount.compareTo(MAX_AMOUNT) > 0) {
+            throw new ResponseStatusException(HttpStatus.BAD_REQUEST, "Enter an amount between 1,000 and 1,00,00,000");
+        }
+        return amount.setScale(2, RoundingMode.HALF_UP);
+    }
+
+    PaperAccount start(Long userId, BigDecimal amount) {
+        BigDecimal start = checkAmount(amount);
         return accounts.findById(userId).orElseGet(() -> {
             PaperAccount a = new PaperAccount();
             a.userId = userId;
-            a.cash = new BigDecimal("10000.00");
-            a.startCash = a.cash;
+            a.cash = start;
+            a.startCash = start;
             a.startBenchmark = lastClose(BENCHMARK);
             return accounts.save(a);
         });
+    }
+
+    void deposit(PaperAccount a, BigDecimal amount) {
+        BigDecimal add = checkAmount(amount);
+        a.cash = a.cash.add(add);
+        a.startCash = a.startCash.add(add);
+        accounts.save(a);
+    }
+
+    void setAuto(PaperAccount a, boolean enabled) {
+        a.autoTrade = enabled;
+        accounts.save(a);
+    }
+
+    void approve(PaperAccount a, Long orderId, LocalDate today) {
+        PaperOrder o = orders.findById(orderId).filter(x -> x.userId.equals(a.userId) && "SUGGESTED".equals(x.status))
+            .orElseThrow(() -> new ResponseStatusException(HttpStatus.NOT_FOUND));
+        o.status = "PENDING";
+        o.decidedOn = today;
+        orders.save(o);
+    }
+
+    void decline(PaperAccount a, Long orderId) {
+        PaperOrder o = orders.findById(orderId).filter(x -> x.userId.equals(a.userId) && "SUGGESTED".equals(x.status))
+            .orElseThrow(() -> new ResponseStatusException(HttpStatus.NOT_FOUND));
+        o.status = "REJECTED";
+        o.reason = (o.reason == null ? "" : o.reason + " ") + "[declined]";
+        orders.save(o);
     }
 
     void reset(Long userId) {
@@ -350,9 +391,11 @@ class PaperEngine {
         Optional<JsonNode> reply = llm.generateJson(buildPrompt(a, pos, bars, equity));
         if (reply.isEmpty()) return "The AI is busy or did not answer. Try again in a few minutes.";
 
-        for (PaperOrder stale : orders.findByUserIdAndStatus(a.userId, "PENDING")) {
-            stale.status = "CANCELLED";
-            orders.save(stale);
+        for (String open : List.of("PENDING", "SUGGESTED")) {
+            for (PaperOrder stale : orders.findByUserIdAndStatus(a.userId, open)) {
+                stale.status = "CANCELLED";
+                orders.save(stale);
+            }
         }
         List<Proposal> props = validate(reply.get(), a.cash, equity, pos, last);
         for (Proposal p : props) {
@@ -361,7 +404,7 @@ class PaperEngine {
             o.symbol = p.symbol();
             o.side = p.side();
             o.qty = p.qty();
-            o.status = "PENDING";
+            o.status = a.autoTrade ? "PENDING" : "SUGGESTED";
             o.reason = p.reason();
             o.decidedOn = today;
             orders.save(o);
@@ -370,7 +413,9 @@ class PaperEngine {
         a.lastSummary = (summary.length() > 500 ? summary.substring(0, 500) : summary) + (props.isEmpty() ? " (No trades.)" : "");
         a.lastDecisionOn = today;
         accounts.save(a);
-        return props.isEmpty() ? "The AI chose to hold." : "The AI placed " + props.size() + " order(s) for the next open.";
+        if (props.isEmpty()) return "The AI suggests holding for now.";
+        return a.autoTrade ? "The AI placed " + props.size() + " order(s) for the next open."
+            : "The AI has " + props.size() + " suggestion(s) for you to approve or decline.";
     }
 
     void execute(PaperAccount a, LocalDate today) {
@@ -478,7 +523,7 @@ record SnapView(LocalDate day, BigDecimal equity, BigDecimal benchmark) {}
 
 record PaperView(BigDecimal cash, BigDecimal startCash, BigDecimal startBenchmark, BigDecimal equity, BigDecimal returnPct,
                  BigDecimal benchmarkPct, List<PositionView> positions, List<OrderView> orders, List<SnapView> history,
-                 String lastSummary, LocalDate lastDecisionOn) {}
+                 String lastSummary, LocalDate lastDecisionOn, boolean autoTrade) {}
 
 @RestController
 @RequestMapping("/api/paper")
@@ -509,11 +554,31 @@ class PaperController {
         return Map.of("available", llm.enabled(), "started", accounts.existsById(uid(jwt)));
     }
 
-    @PostMapping("/start") @ResponseStatus(HttpStatus.NO_CONTENT)
-    void start(@AuthenticationPrincipal Jwt jwt) {
-        if (!llm.enabled()) throw new ResponseStatusException(HttpStatus.SERVICE_UNAVAILABLE, "The AI is not set up on the server yet");
-        engine.start(uid(jwt));
+    record AmountIn(BigDecimal amount) {}
+
+    record AutoIn(boolean enabled) {}
+
+    private PaperAccount account(Jwt jwt) {
+        return accounts.findById(uid(jwt)).orElseThrow(() -> new ResponseStatusException(HttpStatus.NOT_FOUND));
     }
+
+    @PostMapping("/start") @ResponseStatus(HttpStatus.NO_CONTENT)
+    void start(@AuthenticationPrincipal Jwt jwt, @RequestBody AmountIn in) {
+        if (!llm.enabled()) throw new ResponseStatusException(HttpStatus.SERVICE_UNAVAILABLE, "The AI is not set up on the server yet");
+        engine.start(uid(jwt), in.amount());
+    }
+
+    @PostMapping("/deposit") @ResponseStatus(HttpStatus.NO_CONTENT)
+    void deposit(@AuthenticationPrincipal Jwt jwt, @RequestBody AmountIn in) { engine.deposit(account(jwt), in.amount()); }
+
+    @PostMapping("/auto") @ResponseStatus(HttpStatus.NO_CONTENT)
+    void auto(@AuthenticationPrincipal Jwt jwt, @RequestBody AutoIn in) { engine.setAuto(account(jwt), in.enabled()); }
+
+    @PostMapping("/orders/{id}/approve") @ResponseStatus(HttpStatus.NO_CONTENT)
+    void approve(@AuthenticationPrincipal Jwt jwt, @PathVariable Long id) { engine.approve(account(jwt), id, LocalDate.now(IST)); }
+
+    @PostMapping("/orders/{id}/decline") @ResponseStatus(HttpStatus.NO_CONTENT)
+    void decline(@AuthenticationPrincipal Jwt jwt, @PathVariable Long id) { engine.decline(account(jwt), id); }
 
     @PostMapping("/reset") @ResponseStatus(HttpStatus.NO_CONTENT)
     void reset(@AuthenticationPrincipal Jwt jwt) { engine.reset(uid(jwt)); }
@@ -543,6 +608,6 @@ class PaperController {
         List<OrderView> ov = orders.findTop30ByUserIdOrderByIdDesc(a.userId).stream()
             .map(o -> new OrderView(o.id, o.symbol, o.side, o.qty, o.status, o.reason, o.decidedOn, o.fillPrice, o.fees)).toList();
         List<SnapView> hv = snapshots.findByUserIdOrderByDayAsc(a.userId).stream().map(s -> new SnapView(s.day, s.equity, s.benchmark)).toList();
-        return new PaperView(a.cash, a.startCash, a.startBenchmark, equity, ret, benchPct, pv, ov, hv, a.lastSummary, a.lastDecisionOn);
+        return new PaperView(a.cash, a.startCash, a.startBenchmark, equity, ret, benchPct, pv, ov, hv, a.lastSummary, a.lastDecisionOn, a.autoTrade);
     }
 }
