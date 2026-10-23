@@ -145,18 +145,30 @@ class LlmClient {
     boolean enabled() { return !key.isBlank(); }
 
     Optional<JsonNode> generateJson(String prompt) {
-        try {
-            Map<String, Object> body = Map.of(
-                "contents", List.of(Map.of("parts", List.of(Map.of("text", prompt)))),
-                "generationConfig", Map.of("responseMimeType", "application/json", "temperature", 0.3));
-            JsonNode r = client.post().uri("/v1beta/models/{m}:generateContent", model).header("x-goog-api-key", key)
-                .contentType(MediaType.APPLICATION_JSON).body(body).retrieve().body(JsonNode.class);
-            String text = r == null ? "" : r.path("candidates").path(0).path("content").path("parts").path(0).path("text").asText("");
-            return Optional.of(mapper.readTree(stripFences(text)));
-        } catch (Exception e) {
-            log.warn("LLM call failed: {}", e.toString());
-            return Optional.empty();
+        Map<String, Object> body = Map.of(
+            "contents", List.of(Map.of("parts", List.of(Map.of("text", prompt)))),
+            "generationConfig", Map.of("responseMimeType", "application/json", "temperature", 0.3));
+        long[] waitsMs = {0, 4000, 10000};
+        for (int attempt = 0; attempt < waitsMs.length; attempt++) {
+            try {
+                if (waitsMs[attempt] > 0) Thread.sleep(waitsMs[attempt]);
+                JsonNode r = client.post().uri("/v1beta/models/{m}:generateContent", model).header("x-goog-api-key", key)
+                    .contentType(MediaType.APPLICATION_JSON).body(body).retrieve().body(JsonNode.class);
+                String text = r == null ? "" : r.path("candidates").path(0).path("content").path("parts").path(0).path("text").asText("");
+                return Optional.of(mapper.readTree(stripFences(text)));
+            } catch (InterruptedException e) {
+                Thread.currentThread().interrupt();
+                return Optional.empty();
+            } catch (org.springframework.web.client.RestClientResponseException e) {
+                int code = e.getStatusCode().value();
+                log.warn("LLM call failed (attempt {}): {}", attempt + 1, code);
+                if (code != 429 && code != 503 && code != 500) return Optional.empty();
+            } catch (Exception e) {
+                log.warn("LLM call failed: {}", e.toString());
+                return Optional.empty();
+            }
         }
+        return Optional.empty();
     }
 
     static String stripFences(String t) {
