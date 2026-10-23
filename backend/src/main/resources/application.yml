@@ -11,6 +11,8 @@ app:
   google-client-id: ${GOOGLE_CLIENT_ID:}
   token-key: ${TOKEN_ENCRYPTION_KEY:}
   casparser-key: ${CASPARSER_API_KEY:}
+  gemini-key: ${GEMINI_API_KEY:}
+  gemini-model: ${GEMINI_MODEL:gemini-3.8-flash}
 management:
   endpoints:
     web:

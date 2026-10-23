@@ -604,6 +604,136 @@ function Investments({ showToast }: { showToast: (t: { msg: string; undo?: () =>
   )
 }
 
+type PaperView = {
+  cash: number; startCash: number; startBenchmark: number | null; equity: number; returnPct: number; benchmarkPct: number | null
+  positions: { symbol: string; qty: number; avgCost: number; price: number | null; value: number | null; pnl: number | null }[]
+  orders: { id: number; symbol: string; side: string; qty: number; status: string; reason: string | null; decidedOn: string; fillPrice: number | null; fees: number | null }[]
+  history: { day: string; equity: number; benchmark: number | null }[]
+  lastSummary: string | null; lastDecisionOn: string | null
+}
+
+function Chart({ view }: { view: PaperView }) {
+  const pts = view.history
+  if (pts.length < 2) return <p className="muted center">The chart appears after two trading days.</p>
+  const mine = pts.map(h => (h.equity / view.startCash) * 100)
+  const bench = pts.map(h => (view.startBenchmark && h.benchmark ? (h.benchmark / view.startBenchmark) * 100 : NaN))
+  const all = [...mine, ...bench.filter(v => !Number.isNaN(v)), 100]
+  const lo = Math.min(...all)
+  const hi = Math.max(...all)
+  const w = 320
+  const h = 100
+  const x = (i: number) => (i / (pts.length - 1)) * w
+  const y = (v: number) => h - ((v - lo) / (hi - lo || 1)) * h
+  const line = (vals: number[]) => vals.map((v, i) => (Number.isNaN(v) ? '' : `${x(i).toFixed(1)},${y(v).toFixed(1)}`)).filter(Boolean).join(' ')
+  return (
+    <div>
+      <svg viewBox={`0 0 ${w} ${h}`} width="100%" role="img" aria-label="AI portfolio versus Nifty">
+        <polyline points={line(mine)} fill="none" stroke="#2563eb" strokeWidth="2" />
+        <polyline points={line(bench)} fill="none" stroke="#9ca3af" strokeWidth="2" strokeDasharray="4 3" />
+      </svg>
+      <small className="muted">Blue: AI portfolio. Grey dashed: Nifty 50. Both start at 100.</small>
+    </div>
+  )
+}
+
+function PaperTrading({ showToast }: { showToast: (t: { msg: string }) => void }) {
+  const [status, setStatus] = useState<{ available: boolean; started: boolean } | null>(null)
+  const [view, setView] = useState<PaperView | null>(null)
+  const [busy, setBusy] = useState(false)
+
+  const load = useCallback(async () => {
+    const st = await (await api('/paper/status')).json()
+    setStatus(st)
+    if (st.started) {
+      const res = await api('/paper')
+      if (res.ok) setView(await res.json())
+    } else {
+      setView(null)
+    }
+  }, [])
+  useEffect(() => { load().catch(() => setStatus({ available: false, started: false })) }, [load])
+
+  const act = async (path: string, ok?: string) => {
+    setBusy(true)
+    try {
+      const res = await api(path, { method: 'POST' })
+      if (!res.ok) return showToast({ msg: 'Something went wrong. Please try again.' })
+      const msg = ok ?? (await res.json().catch(() => ({}))).message
+      if (msg) showToast({ msg })
+      await load()
+    } finally {
+      setBusy(false)
+    }
+  }
+  const reset = async () => {
+    if (!window.confirm('Reset paper trading? This deletes the virtual account and its history.')) return
+    await act('/paper/reset', 'Paper account reset')
+  }
+
+  if (!status) return <p className="muted center">Loading...</p>
+  if (!status.available) return <section className="card"><p className="muted">AI paper trading needs a free Gemini API key set on the server. It is not set up yet.</p></section>
+
+  if (!status.started || !view) {
+    return (
+      <section className="card form">
+        <strong>AI paper trading</strong>
+        <p className="muted">You get a virtual {money(10000)} rupees. Once a day after the market closes, an AI looks at recent prices of 14 large Indian stocks and a Nifty ETF and places simulated orders, which fill at the next day&apos;s opening price with realistic costs. No real money is ever used.</p>
+        <p className="muted">This is a simulation for learning, not investment advice. AI results are unreliable, and the point is to see honestly how it does against just holding the Nifty. Market prices come from Yahoo and the AI is Google Gemini, whose free tier may use prompts to improve Google products.</p>
+        <button className="primary" disabled={busy} onClick={() => act('/paper/start', 'Paper account created')}>{busy ? 'Starting...' : 'Start with 10,000 virtual rupees'}</button>
+      </section>
+    )
+  }
+
+  const diff = view.benchmarkPct == null ? null : view.returnPct - view.benchmarkPct
+  return (
+    <>
+      <section className="card summary">
+        <div className="muted center">Paper portfolio value</div>
+        <div className="grand">{money(view.equity)}</div>
+        <div className="center">
+          <strong style={{ color: gainColor(view.returnPct) }}>{view.returnPct >= 0 ? '+' : ''}{view.returnPct.toFixed(2)}%</strong>
+          {view.benchmarkPct != null && <span> &middot; Nifty {view.benchmarkPct >= 0 ? '+' : ''}{view.benchmarkPct.toFixed(2)}%</span>}
+          {diff != null && <span style={{ color: gainColor(diff) }}> &middot; {diff >= 0 ? 'ahead by' : 'behind by'} {Math.abs(diff).toFixed(2)} pts</span>}
+        </div>
+        <div className="center muted">Cash {money(view.cash)} &middot; started with {money(view.startCash)}</div>
+        <Chart view={view} />
+      </section>
+
+      <section className="card setup">
+        <strong>Latest AI view</strong>
+        <p className="muted">{view.lastSummary || 'No decision yet. The AI decides once a day after the market closes (about 4 PM IST), or you can run it now.'}</p>
+        <div className="row">
+          <button type="button" className="primary" disabled={busy} onClick={() => act('/paper/run')}>{busy ? 'Asking the AI...' : 'Run AI now'}</button>
+          <button type="button" className="danger" disabled={busy} onClick={reset}>Reset</button>
+        </div>
+        <small className="muted">Decided orders fill at the next trading day&apos;s open. The server must be awake at that time, so this works best with the keep-awake monitor.</small>
+      </section>
+
+      {view.positions.map(p => (
+        <div key={p.symbol} className="card item">
+          <span className="desc"><span>{p.symbol.replace('.NS', '')}</span><small>{p.qty} shares &middot; avg {money(p.avgCost)}</small></span>
+          <span className="right">
+            <strong>{p.value != null ? money(p.value) : 'n/a'}</strong>
+            {p.pnl != null && <small style={{ color: gainColor(p.pnl) }}>{signed(p.pnl)}</small>}
+          </span>
+        </div>
+      ))}
+      {view.positions.length === 0 && <p className="muted center">No open positions.</p>}
+
+      {view.orders.length > 0 && <strong>Recent orders</strong>}
+      {view.orders.map(o => (
+        <div key={o.id} className="card">
+          <div className="kv">
+            <strong>{o.side} {o.qty} {o.symbol.replace('.NS', '')}</strong>
+            <small className="muted">{o.status.toLowerCase()}{o.fillPrice != null ? ` at ${money(o.fillPrice)}` : ''} &middot; {o.decidedOn}</small>
+          </div>
+          {o.reason && <small className="muted">{o.reason}</small>}
+        </div>
+      ))}
+    </>
+  )
+}
+
 function Tracker({ onLogout }: { onLogout: () => void }) {
   const [month, setMonth] = useState(today().slice(0, 7))
   const [expenses, setExpenses] = useState<Expense[] | null>(null)
@@ -613,7 +743,7 @@ function Tracker({ onLogout }: { onLogout: () => void }) {
   const [toast, setToast] = useState<ToastState>(null)
   const [showSms, setShowSms] = useState(false)
   const kiteResult = new URLSearchParams(window.location.search).get('kite')
-  const [tab, setTab] = useState<'expenses' | 'investments'>(kiteResult ? 'investments' : 'expenses')
+  const [tab, setTab] = useState<'expenses' | 'investments' | 'paper'>(kiteResult ? 'investments' : 'expenses')
   const [category, setCategory] = useState(localStorage.getItem('lastCategory') || CATEGORIES[0])
   const toastTimer = useRef<ReturnType<typeof setTimeout>>(undefined)
   const reqId = useRef(0)
@@ -725,9 +855,10 @@ function Tracker({ onLogout }: { onLogout: () => void }) {
       <nav className="tabs">
         <button className={tab === 'expenses' ? 'on' : ''} onClick={() => setTab('expenses')}>Expenses</button>
         <button className={tab === 'investments' ? 'on' : ''} onClick={() => setTab('investments')}>Investments</button>
+        <button className={tab === 'paper' ? 'on' : ''} onClick={() => setTab('paper')}>AI paper</button>
       </nav>
 
-      {tab === 'investments' ? <Investments showToast={showToast} /> : <>
+      {tab === 'paper' ? <PaperTrading showToast={showToast} /> : tab === 'investments' ? <Investments showToast={showToast} /> : <>
       <EntryForm label="Add expense" focus initial={{ amount: '', description: '', category, spentOn: today() }} onSubmit={add} />
 
       <section className="card summary">

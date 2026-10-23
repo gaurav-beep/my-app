@@ -62,6 +62,40 @@ class PriceService {
         return Optional.ofNullable(cached);
     }
 
+    record Bar(java.time.LocalDate date, BigDecimal open, BigDecimal close) {}
+
+    private final Map<String, List<Bar>> barCache = new ConcurrentHashMap<>();
+    private final Map<String, Instant> barFetchedAt = new ConcurrentHashMap<>();
+
+    List<Bar> bars(String symbol) {
+        Instant at = barFetchedAt.get(symbol);
+        List<Bar> cached = barCache.get(symbol);
+        if (cached != null && at != null && at.plus(Duration.ofMinutes(10)).isAfter(Instant.now())) return cached;
+        try {
+            JsonNode r = yahoo.get().uri(u -> u.path("/v8/finance/chart/{s}").queryParam("range", "6mo").queryParam("interval", "1d").build(symbol))
+                .retrieve().body(JsonNode.class).path("chart").path("result").path(0);
+            JsonNode ts = r.path("timestamp");
+            JsonNode q = r.path("indicators").path("quote").path(0);
+            List<Bar> out = new ArrayList<>();
+            for (int i = 0; i < ts.size(); i++) {
+                JsonNode o = q.path("open").path(i);
+                JsonNode c = q.path("close").path(i);
+                if (o.isNumber() && c.isNumber()) {
+                    out.add(new Bar(java.time.LocalDate.ofInstant(Instant.ofEpochSecond(ts.get(i).asLong()), java.time.ZoneId.of("Asia/Kolkata")),
+                        o.decimalValue(), c.decimalValue()));
+                }
+            }
+            if (!out.isEmpty()) {
+                barCache.put(symbol, out);
+                barFetchedAt.put(symbol, Instant.now());
+                return out;
+            }
+        } catch (Exception e) {
+            log.warn("Daily bars lookup failed for {}: {}", symbol, e.toString());
+        }
+        return cached == null ? List.of() : cached;
+    }
+
     List<Map<String, String>> searchStocks(String q) {
         List<Map<String, String>> out = new ArrayList<>();
         try {
