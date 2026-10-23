@@ -3,6 +3,7 @@ package com.example.app;
 import java.math.BigDecimal;
 import java.math.RoundingMode;
 import java.time.DayOfWeek;
+import java.time.Duration;
 import java.time.LocalDate;
 import java.time.LocalDateTime;
 import java.time.LocalTime;
@@ -133,16 +134,13 @@ class LlmClient {
     private final String key;
     private final String model;
     private final ObjectMapper mapper;
-    private final RestClient client;
+    private final java.net.http.HttpClient http = java.net.http.HttpClient.newBuilder()
+        .connectTimeout(Duration.ofSeconds(5)).build();
 
     LlmClient(@Value("${app.gemini-key}") String key, @Value("${app.gemini-model}") String model, ObjectMapper mapper) {
         this.key = key;
         this.model = model;
         this.mapper = mapper;
-        SimpleClientHttpRequestFactory f = new SimpleClientHttpRequestFactory();
-        f.setConnectTimeout(5000);
-        f.setReadTimeout(60000);
-        this.client = RestClient.builder().baseUrl("https://generativelanguage.googleapis.com").requestFactory(f).build();
     }
 
     boolean enabled() { return !key.isBlank(); }
@@ -151,28 +149,43 @@ class LlmClient {
         Map<String, Object> body = Map.of(
             "contents", List.of(Map.of("parts", List.of(Map.of("text", prompt)))),
             "generationConfig", Map.of("responseMimeType", "application/json", "temperature", 0.3));
+        String payload;
+        java.net.URI uri;
+        try {
+            payload = mapper.writeValueAsString(body);
+            uri = java.net.URI.create("https://generativelanguage.googleapis.com/v1beta/models/" + model + ":generateContent");
+        } catch (Exception e) {
+            log.warn("LLM request could not be built: {}", e.toString());
+            return Optional.empty();
+        }
         long[] waitsMs = {0, 4000, 10000};
         for (int attempt = 0; attempt < waitsMs.length; attempt++) {
             try {
                 if (waitsMs[attempt] > 0) Thread.sleep(waitsMs[attempt]);
-                String raw = client.post().uri("/v1beta/models/{m}:generateContent", model).header("x-goog-api-key", key)
-                    .contentType(MediaType.APPLICATION_JSON).body(body).retrieve().body(String.class);
-                JsonNode r = mapper.readTree(raw == null ? "{}" : raw);
-                String text = r.path("candidates").path(0).path("content").path("parts").path(0).path("text").asText("");
-                if (text.isBlank()) {
-                    log.warn("LLM returned no text. Finish reason: {}", r.path("candidates").path(0).path("finishReason").asText("unknown"));
-                    return Optional.empty();
+                java.net.http.HttpRequest req = java.net.http.HttpRequest.newBuilder(uri).timeout(Duration.ofSeconds(60))
+                    .header("Content-Type", "application/json").header("x-goog-api-key", key)
+                    .POST(java.net.http.HttpRequest.BodyPublishers.ofString(payload)).build();
+                java.net.http.HttpResponse<String> resp = http.send(req, java.net.http.HttpResponse.BodyHandlers.ofString());
+                int code = resp.statusCode();
+                if (code == 200) {
+                    JsonNode r = mapper.readTree(resp.body());
+                    String text = r.path("candidates").path(0).path("content").path("parts").path(0).path("text").asText("");
+                    if (text.isBlank()) {
+                        log.warn("LLM returned no text. Finish reason: {}", r.path("candidates").path(0).path("finishReason").asText("unknown"));
+                        return Optional.empty();
+                    }
+                    return Optional.of(mapper.readTree(stripFences(text)));
                 }
-                return Optional.of(mapper.readTree(stripFences(text)));
+                String snippet = resp.body() == null ? "" : resp.body().replaceAll("\\s+", " ");
+                log.warn("LLM call failed (attempt {}): HTTP {} {}", attempt + 1, code, snippet.length() > 300 ? snippet.substring(0, 300) : snippet);
+                if (code != 429 && code != 500 && code != 503) return Optional.empty();
             } catch (InterruptedException e) {
                 Thread.currentThread().interrupt();
                 return Optional.empty();
-            } catch (org.springframework.web.client.RestClientResponseException e) {
-                int code = e.getStatusCode().value();
-                log.warn("LLM call failed (attempt {}): {}", attempt + 1, code);
-                if (code != 429 && code != 503 && code != 500) return Optional.empty();
+            } catch (java.io.IOException e) {
+                log.warn("LLM call failed (attempt {}): {}", attempt + 1, e.toString());
             } catch (Exception e) {
-                log.warn("LLM call failed: {}", e.toString());
+                log.warn("LLM response could not be used: {}", e.toString());
                 return Optional.empty();
             }
         }
