@@ -55,6 +55,7 @@ class PaperAccount {
     String lastSummary;
     @Column(name = "auto_trade")
     boolean autoTrade;
+    String strategy;
 }
 
 @Entity
@@ -309,7 +310,12 @@ class PaperEngine {
         sb.append("Rules:\n- Long only, whole shares only, no leverage, no short selling.\n")
           .append("- At most ").append(MAX_ORDERS).append(" orders.\n")
           .append("- No single stock may exceed ").append(MAX_POSITION_SHARE.multiply(BigDecimal.valueOf(100)).intValue()).append("% of total equity.\n")
-          .append("- Only use symbols from the list below. Prices are in INR.\n\n");
+          .append("- Only use symbols from the list below. Prices are in INR.\n");
+        if (a.strategy != null && !a.strategy.isBlank()) {
+            sb.append("\nThe user's own strategy preferences (follow them where sensible, but never break the rules above):\n")
+              .append(a.strategy.strip()).append("\n");
+        }
+        sb.append("\n");
         sb.append("Account: cash ").append(a.cash).append(", total equity ").append(equity).append(".\n");
         sb.append("Holdings:\n");
         if (pos.isEmpty()) sb.append("- none\n");
@@ -514,16 +520,16 @@ class PaperEngine {
     }
 }
 
-record PositionView(String symbol, long qty, BigDecimal avgCost, BigDecimal price, BigDecimal value, BigDecimal pnl) {}
+record PositionView(String symbol, BigDecimal qty, BigDecimal avgCost, BigDecimal price, BigDecimal value, BigDecimal pnl) {}
 
-record OrderView(Long id, String symbol, String side, long qty, String status, String reason, LocalDate decidedOn,
-                 BigDecimal fillPrice, BigDecimal fees) {}
+record OrderView(Long id, String symbol, String side, BigDecimal qty, String status, String reason, LocalDate decidedOn,
+                 BigDecimal fillPrice, BigDecimal fees, BigDecimal amount) {}
 
 record SnapView(LocalDate day, BigDecimal equity, BigDecimal benchmark) {}
 
 record PaperView(BigDecimal cash, BigDecimal startCash, BigDecimal startBenchmark, BigDecimal equity, BigDecimal returnPct,
                  BigDecimal benchmarkPct, List<PositionView> positions, List<OrderView> orders, List<SnapView> history,
-                 String lastSummary, LocalDate lastDecisionOn, boolean autoTrade) {}
+                 String lastSummary, LocalDate lastDecisionOn, boolean autoTrade, String strategy) {}
 
 @RestController
 @RequestMapping("/api/paper")
@@ -571,6 +577,15 @@ class PaperController {
     @PostMapping("/deposit") @ResponseStatus(HttpStatus.NO_CONTENT)
     void deposit(@AuthenticationPrincipal Jwt jwt, @RequestBody AmountIn in) { engine.deposit(account(jwt), in.amount()); }
 
+    record StrategyIn(String text) {}
+
+    @PostMapping("/strategy") @ResponseStatus(HttpStatus.NO_CONTENT)
+    void strategy(@AuthenticationPrincipal Jwt jwt, @RequestBody StrategyIn in) {
+        PaperAccount a = account(jwt);
+        a.strategy = CryptoEngine.cleanStrategy(in.text());
+        accounts.save(a);
+    }
+
     @PostMapping("/auto") @ResponseStatus(HttpStatus.NO_CONTENT)
     void auto(@AuthenticationPrincipal Jwt jwt, @RequestBody AutoIn in) { engine.setAuto(account(jwt), in.enabled()); }
 
@@ -598,7 +613,7 @@ class PaperController {
             BigDecimal px = engine.lastClose(p.symbol);
             BigDecimal value = px == null ? null : px.multiply(BigDecimal.valueOf(p.qty)).setScale(2, RoundingMode.HALF_UP);
             BigDecimal pnl = value == null ? null : value.subtract(p.avgCost.multiply(BigDecimal.valueOf(p.qty))).setScale(2, RoundingMode.HALF_UP);
-            pv.add(new PositionView(p.symbol, p.qty, p.avgCost, px, value, pnl));
+            pv.add(new PositionView(p.symbol, BigDecimal.valueOf(p.qty), p.avgCost, px, value, pnl));
         }
         BigDecimal equity = engine.equity(a, pos);
         BigDecimal ret = equity.subtract(a.startCash).multiply(BigDecimal.valueOf(100)).divide(a.startCash, 2, RoundingMode.HALF_UP);
@@ -606,8 +621,8 @@ class PaperController {
         BigDecimal benchPct = a.startBenchmark == null || benchNow == null || a.startBenchmark.signum() == 0 ? null
             : benchNow.subtract(a.startBenchmark).multiply(BigDecimal.valueOf(100)).divide(a.startBenchmark, 2, RoundingMode.HALF_UP);
         List<OrderView> ov = orders.findTop30ByUserIdOrderByIdDesc(a.userId).stream()
-            .map(o -> new OrderView(o.id, o.symbol, o.side, o.qty, o.status, o.reason, o.decidedOn, o.fillPrice, o.fees)).toList();
+            .map(o -> new OrderView(o.id, o.symbol, o.side, BigDecimal.valueOf(o.qty), o.status, o.reason, o.decidedOn, o.fillPrice, o.fees, null)).toList();
         List<SnapView> hv = snapshots.findByUserIdOrderByDayAsc(a.userId).stream().map(s -> new SnapView(s.day, s.equity, s.benchmark)).toList();
-        return new PaperView(a.cash, a.startCash, a.startBenchmark, equity, ret, benchPct, pv, ov, hv, a.lastSummary, a.lastDecisionOn, a.autoTrade);
+        return new PaperView(a.cash, a.startCash, a.startBenchmark, equity, ret, benchPct, pv, ov, hv, a.lastSummary, a.lastDecisionOn, a.autoTrade, a.strategy);
     }
 }

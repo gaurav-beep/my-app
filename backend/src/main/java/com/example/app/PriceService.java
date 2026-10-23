@@ -62,6 +62,40 @@ class PriceService {
         return Optional.ofNullable(cached);
     }
 
+    record Candle(long time, BigDecimal open, BigDecimal close) {}
+
+    private final RestClient dcxPublic = client("https://public.coindcx.com");
+    private final Map<String, List<Candle>> candleCache = new ConcurrentHashMap<>();
+    private final Map<String, Instant> candleFetchedAt = new ConcurrentHashMap<>();
+
+    List<Candle> candles(String coin, String interval, int limit) {
+        String key = coin + ":" + interval + ":" + limit;
+        Instant at = candleFetchedAt.get(key);
+        List<Candle> cached = candleCache.get(key);
+        if (cached != null && at != null && at.plus(Duration.ofMinutes(5)).isAfter(Instant.now())) return cached;
+        try {
+            JsonNode n = dcxPublic.get().uri(u -> u.path("/market_data/candles").queryParam("pair", "I-" + coin + "_INR")
+                .queryParam("interval", interval).queryParam("limit", limit).build()).retrieve().body(JsonNode.class);
+            List<Candle> out = new ArrayList<>();
+            if (n != null && n.isArray()) {
+                for (JsonNode x : n) {
+                    if (x.path("close").isNumber() && x.path("open").isNumber()) {
+                        out.add(new Candle(x.path("time").asLong(), x.path("open").decimalValue(), x.path("close").decimalValue()));
+                    }
+                }
+            }
+            out.sort(java.util.Comparator.comparingLong(Candle::time));
+            if (!out.isEmpty()) {
+                candleCache.put(key, out);
+                candleFetchedAt.put(key, Instant.now());
+                return out;
+            }
+        } catch (Exception e) {
+            log.warn("Candles lookup failed for {}: {}", key, e.toString());
+        }
+        return cached == null ? List.of() : cached;
+    }
+
     record Bar(java.time.LocalDate date, BigDecimal open, BigDecimal close) {}
 
     private final Map<String, List<Bar>> barCache = new ConcurrentHashMap<>();

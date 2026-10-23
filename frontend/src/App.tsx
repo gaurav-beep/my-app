@@ -607,12 +607,12 @@ function Investments({ showToast }: { showToast: (t: { msg: string; undo?: () =>
 type PaperView = {
   cash: number; startCash: number; startBenchmark: number | null; equity: number; returnPct: number; benchmarkPct: number | null
   positions: { symbol: string; qty: number; avgCost: number; price: number | null; value: number | null; pnl: number | null }[]
-  orders: { id: number; symbol: string; side: string; qty: number; status: string; reason: string | null; decidedOn: string; fillPrice: number | null; fees: number | null }[]
+  orders: { id: number; symbol: string; side: string; qty: number; status: string; reason: string | null; decidedOn: string; fillPrice: number | null; fees: number | null; amount?: number | null }[]
   history: { day: string; equity: number; benchmark: number | null }[]
-  lastSummary: string | null; lastDecisionOn: string | null; autoTrade: boolean
+  lastSummary: string | null; lastDecisionOn: string | null; autoTrade: boolean; strategy: string | null
 }
 
-function Chart({ view }: { view: PaperView }) {
+function Chart({ view, benchmarkName }: { view: PaperView; benchmarkName: string }) {
   const pts = view.history
   if (pts.length < 2) return <p className="muted center">The chart appears after two trading days.</p>
   const mine = pts.map(h => (h.equity / view.startCash) * 100)
@@ -627,32 +627,40 @@ function Chart({ view }: { view: PaperView }) {
   const line = (vals: number[]) => vals.map((v, i) => (Number.isNaN(v) ? '' : `${x(i).toFixed(1)},${y(v).toFixed(1)}`)).filter(Boolean).join(' ')
   return (
     <div>
-      <svg viewBox={`0 0 ${w} ${h}`} width="100%" role="img" aria-label="AI portfolio versus Nifty">
+      <svg viewBox={`0 0 ${w} ${h}`} width="100%" role="img" aria-label={`AI portfolio versus ${benchmarkName}`}>
         <polyline points={line(mine)} fill="none" stroke="#2563eb" strokeWidth="2" />
         <polyline points={line(bench)} fill="none" stroke="#9ca3af" strokeWidth="2" strokeDasharray="4 3" />
       </svg>
-      <small className="muted">Blue: AI portfolio. Grey dashed: Nifty 50. Both start at 100.</small>
+      <small className="muted">Blue: AI portfolio. Grey dashed: {benchmarkName}. Both start at 100.</small>
     </div>
   )
 }
 
-function PaperTrading({ showToast }: { showToast: (t: { msg: string }) => void }) {
+function PaperTrading({ showToast, market }: { showToast: (t: { msg: string }) => void; market: 'stock' | 'crypto' }) {
+  const crypto = market === 'crypto'
+  const base = crypto ? '/crypto-paper' : '/paper'
+  const benchmarkName = crypto ? 'Bitcoin' : 'Nifty'
   const [status, setStatus] = useState<{ available: boolean; started: boolean } | null>(null)
   const [view, setView] = useState<PaperView | null>(null)
   const [busy, setBusy] = useState(false)
   const [amount, setAmount] = useState('10000')
   const [extra, setExtra] = useState('')
+  const [strategy, setStrategy] = useState('')
 
   const load = useCallback(async () => {
-    const st = await (await api('/paper/status')).json()
+    const st = await (await api(`${base}/status`)).json()
     setStatus(st)
     if (st.started) {
-      const res = await api('/paper')
-      if (res.ok) setView(await res.json())
+      const res = await api(base)
+      if (res.ok) {
+        const v: PaperView = await res.json()
+        setView(v)
+        setStrategy(v.strategy ?? '')
+      }
     } else {
       setView(null)
     }
-  }, [])
+  }, [base])
   useEffect(() => { load().catch(() => setStatus({ available: false, started: false })) }, [load])
 
   const act = async (path: string, ok?: string, body?: object) => {
@@ -672,7 +680,7 @@ function PaperTrading({ showToast }: { showToast: (t: { msg: string }) => void }
   }
   const reset = async () => {
     if (!window.confirm('Reset paper trading? This deletes the virtual account and its history.')) return
-    await act('/paper/reset', 'Paper account reset')
+    await act(`${base}/reset`, 'Paper account reset')
   }
 
   if (!status) return <p className="muted center">Loading...</p>
@@ -682,11 +690,20 @@ function PaperTrading({ showToast }: { showToast: (t: { msg: string }) => void }
     return (
       <section className="card form">
         <strong>AI paper trading</strong>
-        <p className="muted">You choose a virtual amount to start with. Once a day after the market closes, an AI looks at recent prices of 14 large Indian stocks and a Nifty ETF and places simulated orders, which fill at the next day&apos;s opening price with realistic costs. No real money is ever used.</p>
-        <p className="muted">This is a simulation for learning, not investment advice. AI results are unreliable, and the point is to see honestly how it does against just holding the Nifty. Market prices come from Yahoo and the AI is Google Gemini, whose free tier may use prompts to improve Google products.</p>
+        {crypto ? (
+          <>
+            <p className="muted">You choose a virtual amount in rupees. Crypto trades 24 hours a day, so every 4 hours an AI looks at prices of 10 popular coins and suggests simulated trades. Orders fill straight away at the current CoinDCX price with a small cost and slippage. No real money is ever used.</p>
+            <p className="muted">This is a simulation for learning, not investment advice. Crypto is very volatile and AI results are unreliable. The point is to see honestly how it does against just holding Bitcoin. India&apos;s 1% TDS and crypto tax are not modelled. Prices come from CoinDCX and the AI is Google Gemini, whose free tier may use prompts to improve Google products.</p>
+          </>
+        ) : (
+          <>
+            <p className="muted">You choose a virtual amount to start with. Once a day after the market closes, an AI looks at recent prices of 14 large Indian stocks and a Nifty ETF and places simulated orders, which fill at the next day&apos;s opening price with realistic costs. No real money is ever used.</p>
+            <p className="muted">This is a simulation for learning, not investment advice. AI results are unreliable, and the point is to see honestly how it does against just holding the Nifty. Market prices come from Yahoo and the AI is Google Gemini, whose free tier may use prompts to improve Google products.</p>
+          </>
+        )}
         <input inputMode="decimal" value={amount} onChange={e => setAmount(e.target.value.replace(/[^0-9.]/g, ''))} placeholder="Virtual amount in rupees" aria-label="Starting amount" />
         <small className="muted">Any amount from 1,000 to 1,00,00,000 rupees. You can add more later.</small>
-        <button className="primary" disabled={busy || !amount} onClick={() => act('/paper/start', 'Paper account created', { amount: Number(amount) })}>{busy ? 'Starting...' : 'Start paper account'}</button>
+        <button className="primary" disabled={busy || !amount} onClick={() => act(`${base}/start`, 'Paper account created', { amount: Number(amount) })}>{busy ? 'Starting...' : 'Start paper account'}</button>
       </section>
     )
   }
@@ -699,30 +716,39 @@ function PaperTrading({ showToast }: { showToast: (t: { msg: string }) => void }
         <div className="grand">{money(view.equity)}</div>
         <div className="center">
           <strong style={{ color: gainColor(view.returnPct) }}>{view.returnPct >= 0 ? '+' : ''}{view.returnPct.toFixed(2)}%</strong>
-          {view.benchmarkPct != null && <span> &middot; Nifty {view.benchmarkPct >= 0 ? '+' : ''}{view.benchmarkPct.toFixed(2)}%</span>}
+          {view.benchmarkPct != null && <span> &middot; {benchmarkName} {view.benchmarkPct >= 0 ? '+' : ''}{view.benchmarkPct.toFixed(2)}%</span>}
           {diff != null && <span style={{ color: gainColor(diff) }}> &middot; {diff >= 0 ? 'ahead by' : 'behind by'} {Math.abs(diff).toFixed(2)} pts</span>}
         </div>
         <div className="center muted">Cash {money(view.cash)} &middot; started with {money(view.startCash)}</div>
-        <Chart view={view} />
+        <Chart view={view} benchmarkName={benchmarkName} />
       </section>
 
       <section className="card setup">
         <strong>Latest AI view</strong>
-        <p className="muted">{view.lastSummary || 'No decision yet. The AI decides once a day after the market closes (about 4 PM IST), or you can run it now.'}</p>
+        <p className="muted">{view.lastSummary || (crypto ? 'No decision yet. The AI decides every 4 hours, or you can run it now.' : 'No decision yet. The AI decides once a day after the market closes (about 4 PM IST), or you can run it now.')}</p>
         <div className="row">
-          <button type="button" className="primary" disabled={busy} onClick={() => act('/paper/run')}>{busy ? 'Asking the AI...' : 'Run AI now'}</button>
+          <button type="button" className="primary" disabled={busy} onClick={() => act(`${base}/run`)}>{busy ? 'Asking the AI...' : 'Run AI now'}</button>
           <button type="button" className="danger" disabled={busy} onClick={reset}>Reset</button>
         </div>
         <label className="row" style={{ alignItems: 'center' }}>
-          <input type="checkbox" checked={view.autoTrade} disabled={busy} onChange={e => act('/paper/auto', e.target.checked ? 'Auto-trading on' : 'Auto-trading off', { enabled: e.target.checked })} style={{ minHeight: 'auto', width: 20, height: 20 }} />
+          <input type="checkbox" checked={view.autoTrade} disabled={busy} onChange={e => act(`${base}/auto`, e.target.checked ? 'Auto-trading on' : 'Auto-trading off', { enabled: e.target.checked })} style={{ minHeight: 'auto', width: 20, height: 20 }} />
           <span>Auto-trade: AI orders go through without asking me</span>
         </label>
-        <small className="muted">{view.autoTrade ? 'Orders the AI decides fill automatically at the next trading day\'s open.' : 'With auto-trade off, the AI only suggests trades. You approve or decline each one.'}</small>
+        <small className="muted">{view.autoTrade ? (crypto ? 'Orders the AI decides fill automatically at the current price.' : 'Orders the AI decides fill automatically at the next trading day\'s open.') : 'With auto-trade off, the AI only suggests trades. You approve or decline each one.'}</small>
         <div className="row">
           <input inputMode="decimal" value={extra} onChange={e => setExtra(e.target.value.replace(/[^0-9.]/g, ''))} placeholder="Add virtual cash" aria-label="Add virtual cash" style={{ flex: 1 }} />
-          <button type="button" disabled={busy || !extra} onClick={async () => { await act('/paper/deposit', 'Cash added', { amount: Number(extra) }); setExtra('') }}>Add</button>
+          <button type="button" disabled={busy || !extra} onClick={async () => { await act(`${base}/deposit`, 'Cash added', { amount: Number(extra) }); setExtra('') }}>Add</button>
         </div>
-        <small className="muted">Added cash counts as capital you put in, so return percentages stay fair, but comparing with the Nifty becomes approximate. The server must be awake at the next open for orders to fill, so this works best with the keep-awake monitor.</small>
+        <small className="muted">Added cash counts as capital you put in, so return percentages stay fair, but comparing with {benchmarkName} becomes approximate.{crypto ? '' : ' The server must be awake at the next open for orders to fill, so this works best with the keep-awake monitor.'}</small>
+      </section>
+
+      <section className="card setup">
+        <strong>My strategy (optional)</strong>
+        <textarea value={strategy} maxLength={500} rows={3} onChange={e => setStrategy(e.target.value)} aria-label="My strategy"
+          placeholder={crypto ? 'For example: only trade BTC and ETH, buy after a 5% dip, sell when up 8%, never hold more than 2 coins.' : 'For example: prefer banks and IT, buy on dips, sell when up 10%, keep at least 30% in cash.'}
+          style={{ font: 'inherit', padding: '0.5rem 0.75rem', border: '1px solid var(--border)', borderRadius: 10, background: 'var(--card)', color: 'inherit', resize: 'vertical' }} />
+        <button type="button" disabled={busy} onClick={() => act(`${base}/strategy`, 'Strategy saved', { text: strategy })}>Save strategy</button>
+        <small className="muted">The AI reads this in its next decision and tries to follow it, but the safety limits always apply. It is not a rules engine, so it may interpret it loosely.</small>
       </section>
 
       {view.orders.some(o => o.status === 'SUGGESTED') && <strong>AI suggestions for you</strong>}
@@ -730,12 +756,12 @@ function PaperTrading({ showToast }: { showToast: (t: { msg: string }) => void }
         <div key={o.id} className="card form">
           <div className="kv">
             <strong>{o.side === 'BUY' ? 'Buy' : 'Sell'} {o.qty} {o.symbol.replace('.NS', '')}</strong>
-            <small className="muted">{o.decidedOn}</small>
+            <small className="muted">{o.amount != null ? `about ${money(o.amount)} INR` : o.decidedOn}</small>
           </div>
           {o.reason && <small className="muted">{o.reason}</small>}
           <div className="row">
-            <button type="button" className="primary" disabled={busy} onClick={() => act(`/paper/orders/${o.id}/approve`, 'Approved. It fills at the next open.')}>Approve</button>
-            <button type="button" disabled={busy} onClick={() => act(`/paper/orders/${o.id}/decline`, 'Declined')}>Decline</button>
+            <button type="button" className="primary" disabled={busy} onClick={() => act(`${base}/orders/${o.id}/approve`, crypto ? 'Approved and filled at the current price' : 'Approved. It fills at the next open.')}>Approve</button>
+            <button type="button" disabled={busy} onClick={() => act(`${base}/orders/${o.id}/decline`, 'Declined')}>Decline</button>
           </div>
         </div>
       ))}
@@ -774,6 +800,7 @@ function Tracker({ onLogout }: { onLogout: () => void }) {
   const [toast, setToast] = useState<ToastState>(null)
   const [showSms, setShowSms] = useState(false)
   const kiteResult = new URLSearchParams(window.location.search).get('kite')
+  const [market, setMarket] = useState<'stock' | 'crypto'>('stock')
   const [tab, setTab] = useState<'expenses' | 'investments' | 'paper'>(kiteResult ? 'investments' : 'expenses')
   const [category, setCategory] = useState(localStorage.getItem('lastCategory') || CATEGORIES[0])
   const toastTimer = useRef<ReturnType<typeof setTimeout>>(undefined)
@@ -889,7 +916,15 @@ function Tracker({ onLogout }: { onLogout: () => void }) {
         <button className={tab === 'paper' ? 'on' : ''} onClick={() => setTab('paper')}>AI paper</button>
       </nav>
 
-      {tab === 'paper' ? <PaperTrading showToast={showToast} /> : tab === 'investments' ? <Investments showToast={showToast} /> : <>
+      {tab === 'paper' ? (
+        <>
+          <nav className="tabs">
+            <button className={market === 'stock' ? 'on' : ''} onClick={() => setMarket('stock')}>Stocks</button>
+            <button className={market === 'crypto' ? 'on' : ''} onClick={() => setMarket('crypto')}>Crypto 24/7</button>
+          </nav>
+          <PaperTrading key={market} market={market} showToast={showToast} />
+        </>
+      ) : tab === 'investments' ? <Investments showToast={showToast} /> : <>
       <EntryForm label="Add expense" focus initial={{ amount: '', description: '', category, spentOn: today() }} onSubmit={add} />
 
       <section className="card summary">
