@@ -152,9 +152,14 @@ class LlmClient {
         for (int attempt = 0; attempt < waitsMs.length; attempt++) {
             try {
                 if (waitsMs[attempt] > 0) Thread.sleep(waitsMs[attempt]);
-                JsonNode r = client.post().uri("/v1beta/models/{m}:generateContent", model).header("x-goog-api-key", key)
-                    .contentType(MediaType.APPLICATION_JSON).body(body).retrieve().body(JsonNode.class);
-                String text = r == null ? "" : r.path("candidates").path(0).path("content").path("parts").path(0).path("text").asText("");
+                String raw = client.post().uri("/v1beta/models/{m}:generateContent", model).header("x-goog-api-key", key)
+                    .contentType(MediaType.APPLICATION_JSON).body(body).retrieve().body(String.class);
+                JsonNode r = mapper.readTree(raw == null ? "{}" : raw);
+                String text = r.path("candidates").path(0).path("content").path("parts").path(0).path("text").asText("");
+                if (text.isBlank()) {
+                    log.warn("LLM returned no text. Finish reason: {}", r.path("candidates").path(0).path("finishReason").asText("unknown"));
+                    return Optional.empty();
+                }
                 return Optional.of(mapper.readTree(stripFences(text)));
             } catch (InterruptedException e) {
                 Thread.currentThread().interrupt();
