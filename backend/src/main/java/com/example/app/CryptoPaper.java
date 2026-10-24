@@ -179,9 +179,9 @@ class CryptoEngine {
         CryptoOrder first = list.get(0);
         String what = switch (first.side) { case "BUY" -> "Buy "; case "SELL" -> "Sell "; case "SHORT" -> "Short "; default -> "Cover "; };
         what += (first.qty == null ? "" : first.qty.stripTrailingZeros().toPlainString() + " ") + first.symbol;
-        String subject = list.size() == 1 ? "AI Crypto Lab: " + what : "AI Crypto Lab: " + list.size() + " trades";
+        String title = list.size() == 1 ? what : list.size() + " trades";
         BigDecimal equity = equity(a, positions.findByUserId(a.userId));
-        notifier.sendAsync(a.userId, subject, Notifier.tradesBody(list, equity, a.cash, notifier.appUrl(), headline));
+        notifier.sendAsync(a.userId, "AI Crypto Lab: Trade Confirmation", title + "\n\n" + Notifier.tradesBody(list, equity, a.cash, notifier.appUrl(), headline));
     }
 
     static String cleanStrategy(String text) {
