@@ -237,3 +237,24 @@ input:focus-visible, textarea:focus-visible, button:focus-visible, summary:focus
   .tiles { grid-template-columns: 1fr 1fr; }
   .user-name { display: none; }
 }
+
+/* analysis + custom trade */
+select {
+  width: 100%; min-height: 46px; padding: 0.6rem 0.85rem; border: 1px solid var(--border); border-radius: 12px;
+  background: var(--bg); font: inherit; color: inherit;
+}
+.spacer { flex: 1; }
+.chip.on { background: var(--accent); border-color: var(--accent); color: #fff; }
+.stats { display: grid; grid-template-columns: repeat(2, 1fr); gap: 0.55rem; }
+.stats.three { grid-template-columns: repeat(3, 1fr); }
+.stat { background: var(--bg); border: 1px solid var(--border); border-radius: 12px; padding: 0.55rem 0.7rem; display: grid; gap: 0.1rem; min-width: 0; }
+.stat small { color: var(--muted); }
+.stat b { font-size: 0.92rem; overflow-wrap: anywhere; }
+.stat b.up { color: var(--up); }
+.stat b.down { color: var(--down); }
+.alloc { display: flex; height: 16px; border-radius: 999px; overflow: hidden; background: var(--border); }
+.seg { display: block; height: 100%; min-width: 2px; }
+.seg.cash, .dot.cash { background: #94a3b8; }
+.legend-list { display: flex; flex-wrap: wrap; gap: 0.4rem 1rem; font-size: 0.88rem; }
+.legend-list b { margin-left: 0.15rem; }
+.dot { display: inline-block; width: 10px; height: 10px; border-radius: 50%; margin-right: 0.3rem; }

@@ -83,6 +83,11 @@ class CryptoOrder {
     @Column(name = "fill_price")
     BigDecimal fillPrice;
     BigDecimal fees;
+    @Column(name = "trigger_price")
+    BigDecimal triggerPrice;
+    @Column(name = "trigger_dir")
+    String triggerDir;
+    String source = "AI";
 }
 
 @Entity
@@ -109,6 +114,10 @@ interface CryptoOrderRepository extends JpaRepository<CryptoOrder, Long> {
     List<CryptoOrder> findTop30ByUserIdOrderByIdDesc(Long userId);
 
     List<CryptoOrder> findByUserId(Long userId);
+
+    List<CryptoOrder> findByStatus(String status);
+
+    long countByUserIdAndStatus(Long userId, String status);
 }
 
 interface CryptoSnapshotRepository extends JpaRepository<CryptoSnapshot, Long> {
@@ -191,6 +200,7 @@ class CryptoEngine {
     }
 
     void reset(Long userId) {
+        watching.set(-1);
         orders.deleteAll(orders.findByUserId(userId));
         positions.deleteAll(positions.findByUserId(userId));
         snapshots.deleteAll(snapshots.findByUserId(userId));
@@ -348,6 +358,102 @@ class CryptoEngine {
         accounts.save(a);
     }
 
+    static final int MAX_WATCHING = 10;
+    private final java.util.concurrent.atomic.AtomicInteger watching = new java.util.concurrent.atomic.AtomicInteger(-1);
+
+    private static ResponseStatusException bad(String msg) {
+        return new ResponseStatusException(HttpStatus.BAD_REQUEST, msg);
+    }
+
+    static String triggerDir(BigDecimal target, BigDecimal current) {
+        int c = target.compareTo(current);
+        return c == 0 ? null : c > 0 ? "ABOVE" : "BELOW";
+    }
+
+    String place(CryptoAccount a, TradeIn in) {
+        String side = in.side() == null ? "" : in.side().toUpperCase();
+        String symbol = in.symbol() == null ? "" : in.symbol().toUpperCase();
+        if (!UNIVERSE.contains(symbol) || !(side.equals("BUY") || side.equals("SELL"))) throw bad("Pick a coin and choose Buy or Sell");
+        BigDecimal px = price(symbol);
+        if (px == null) throw bad("No live price for " + symbol + " right now. Try again in a moment.");
+        List<CryptoPosition> pos = new ArrayList<>(positions.findByUserId(a.userId));
+        CryptoPosition held = pos.stream().filter(p -> p.symbol.equals(symbol)).findFirst().orElse(null);
+        boolean trigger = in.price() != null;
+        BigDecimal ref = trigger ? in.price() : px;
+        if (ref.signum() <= 0) throw bad("Enter a price above zero");
+        BigDecimal amount;
+        BigDecimal qty;
+        if (side.equals("BUY")) {
+            amount = in.amount();
+            if (amount == null || amount.compareTo(MIN_TRADE) < 0) throw bad("The minimum amount is " + MIN_TRADE.toPlainString() + " rupees");
+            if (!trigger && amount.compareTo(a.cash) > 0) throw bad("You only have " + a.cash.toPlainString() + " rupees in cash");
+            qty = amount.divide(ref, 8, RoundingMode.DOWN);
+        } else {
+            if (held == null || held.qty.signum() <= 0) throw bad("You don't hold any " + symbol);
+            BigDecimal pc = in.percent();
+            if (pc == null || pc.signum() <= 0 || pc.compareTo(BigDecimal.valueOf(100)) > 0) throw bad("Choose between 1 and 100 percent");
+            qty = held.qty.multiply(pc).divide(BigDecimal.valueOf(100), 8, RoundingMode.DOWN);
+            amount = qty.multiply(ref);
+            if (amount.compareTo(BigDecimal.ONE) < 0) throw bad("That amount is too small to sell");
+        }
+        CryptoOrder o = new CryptoOrder();
+        o.userId = a.userId;
+        o.symbol = symbol;
+        o.side = side;
+        o.qty = qty;
+        o.amountInr = amount.setScale(2, RoundingMode.DOWN);
+        o.decidedOn = LocalDate.now(IST);
+        o.source = "USER";
+        if (trigger) {
+            String dir = triggerDir(ref, px);
+            if (dir == null) throw bad("Pick a price different from the current price");
+            if (orders.countByUserIdAndStatus(a.userId, "WATCHING") >= MAX_WATCHING) throw bad("You can watch up to " + MAX_WATCHING + " orders at once. Cancel one first.");
+            o.status = "WATCHING";
+            o.triggerPrice = ref.setScale(4, RoundingMode.HALF_UP);
+            o.triggerDir = dir;
+            o.reason = "Your price order";
+            orders.save(o);
+            watching.set(-1);
+            return "Watching " + symbol + ": will " + side.toLowerCase() + " when the price " + (dir.equals("ABOVE") ? "rises to " : "falls to ") + ref.stripTrailingZeros().toPlainString();
+        }
+        o.status = "PENDING";
+        o.reason = "Your order";
+        o = orders.save(o);
+        fill(a, o, pos);
+        return "FILLED".equals(o.status) ? (side.equals("BUY") ? "Bought " : "Sold ") + o.qty.stripTrailingZeros().toPlainString() + " " + symbol + " at the live price"
+            : "Order not filled" + (o.reason == null ? "" : ": " + o.reason);
+    }
+
+    void cancel(CryptoAccount a, Long orderId) {
+        CryptoOrder o = orders.findById(orderId).filter(x -> x.userId.equals(a.userId) && "WATCHING".equals(x.status))
+            .orElseThrow(() -> new ResponseStatusException(HttpStatus.NOT_FOUND));
+        o.status = "CANCELLED";
+        orders.save(o);
+        watching.set(-1);
+    }
+
+    @Scheduled(initialDelay = 60000, fixedDelay = 5000)
+    void checkTriggers() {
+        if (watching.get() == 0) return;
+        try {
+            List<CryptoOrder> open = orders.findByStatus("WATCHING");
+            int left = open.size();
+            for (CryptoOrder o : open) {
+                BigDecimal px = price(o.symbol);
+                if (px == null || o.triggerPrice == null) continue;
+                boolean hit = "BELOW".equals(o.triggerDir) ? px.compareTo(o.triggerPrice) <= 0 : px.compareTo(o.triggerPrice) >= 0;
+                if (!hit) continue;
+                CryptoAccount a = accounts.findById(o.userId).orElse(null);
+                if (a == null) continue;
+                fill(a, o, new ArrayList<>(positions.findByUserId(a.userId)));
+                left--;
+            }
+            watching.set(left);
+        } catch (Exception e) {
+            log.warn("Price order check failed: {}", e.toString());
+        }
+    }
+
     void approve(CryptoAccount a, Long orderId) {
         CryptoOrder o = orders.findById(orderId).filter(x -> x.userId.equals(a.userId) && "SUGGESTED".equals(x.status))
             .orElseThrow(() -> new ResponseStatusException(HttpStatus.NOT_FOUND));
@@ -443,7 +549,9 @@ class CryptoEngine {
 record LivePosition(String symbol, BigDecimal price, BigDecimal value, BigDecimal pnl) {}
 
 record LiveView(BigDecimal equity, BigDecimal cash, BigDecimal returnPct, BigDecimal benchmarkPct, BigDecimal benchmarkPrice,
-                List<LivePosition> positions, String asOf) {}
+                List<LivePosition> positions, Map<String, BigDecimal> prices, String asOf) {}
+
+record TradeIn(String side, String symbol, BigDecimal amount, BigDecimal percent, BigDecimal price) {}
 
 @RestController
 @RequestMapping("/api/crypto-paper")
@@ -531,7 +639,39 @@ class CryptoPaperController {
         BigDecimal bench = engine.price(CryptoEngine.BENCHMARK);
         BigDecimal benchPct = a.startBenchmark == null || bench == null || a.startBenchmark.signum() == 0 ? null
             : bench.subtract(a.startBenchmark).multiply(BigDecimal.valueOf(100)).divide(a.startBenchmark, 2, RoundingMode.HALF_UP);
-        return new LiveView(equity, a.cash, ret, benchPct, bench, lp, java.time.Instant.now().toString());
+        Map<String, BigDecimal> all = new java.util.LinkedHashMap<>();
+        for (String coin : CryptoEngine.UNIVERSE) {
+            BigDecimal px = engine.price(coin);
+            if (px != null) all.put(coin, px);
+        }
+        return new LiveView(equity, a.cash, ret, benchPct, bench, lp, all, java.time.Instant.now().toString());
+    }
+
+    @PostMapping("/trade")
+    Map<String, String> trade(@AuthenticationPrincipal Jwt jwt, @RequestBody TradeIn in) {
+        return Map.of("message", engine.place(account(jwt), new TradeIn(in.side(), in.symbol(), in.amount(), in.percent(), null)));
+    }
+
+    @PostMapping("/trigger")
+    Map<String, String> trigger(@AuthenticationPrincipal Jwt jwt, @RequestBody TradeIn in) {
+        if (in.price() == null) throw new ResponseStatusException(HttpStatus.BAD_REQUEST, "Enter the price to wait for");
+        return Map.of("message", engine.place(account(jwt), in));
+    }
+
+    @PostMapping("/orders/{id}/cancel") @ResponseStatus(HttpStatus.NO_CONTENT)
+    void cancelOrder(@AuthenticationPrincipal Jwt jwt, @PathVariable Long id) { engine.cancel(account(jwt), id); }
+
+    @GetMapping("/analysis")
+    Analysis analysis(@AuthenticationPrincipal Jwt jwt) {
+        CryptoAccount a = account(jwt);
+        List<CryptoPosition> pos = positions.findByUserId(a.userId);
+        Map<String, BigDecimal> prices = new java.util.LinkedHashMap<>();
+        for (String coin : CryptoEngine.UNIVERSE) {
+            BigDecimal px = engine.price(coin);
+            if (px != null) prices.put(coin, px);
+        }
+        return CryptoAnalysis.build(a.startCash, a.startBenchmark, a.cash, engine.equity(a, pos), engine.price(CryptoEngine.BENCHMARK),
+            pos, prices, orders.findByUserId(a.userId), snapshots.findByUserIdOrderByDayAsc(a.userId));
     }
 
     @GetMapping
@@ -552,7 +692,7 @@ class CryptoPaperController {
             : benchNow.subtract(a.startBenchmark).multiply(BigDecimal.valueOf(100)).divide(a.startBenchmark, 2, RoundingMode.HALF_UP);
         List<OrderView> ov = orders.findTop30ByUserIdOrderByIdDesc(a.userId).stream()
             .map(o -> new OrderView(o.id, o.symbol, o.side, o.qty == null ? BigDecimal.ZERO : o.qty.stripTrailingZeros(), o.status, o.reason,
-                o.decidedOn, o.fillPrice, o.fees, o.amountInr)).toList();
+                o.decidedOn, o.fillPrice, o.fees, o.amountInr, o.triggerPrice, o.triggerDir, o.source)).toList();
         List<SnapView> hv = snapshots.findByUserIdOrderByDayAsc(a.userId).stream().map(s -> new SnapView(s.day, s.equity, s.benchmark)).toList();
         LocalDate decided = a.lastDecisionAt == null ? null : a.lastDecisionAt.atZone(ZoneOffset.UTC).withZoneSameInstant(IST).toLocalDate();
         return new PaperView(a.cash, a.startCash, a.startBenchmark, equity, ret, benchPct, pv, ov, hv, a.lastSummary, decided, a.autoTrade, a.strategy);

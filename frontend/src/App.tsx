@@ -6,6 +6,14 @@ type ToastState = { msg: string } | null
 type Order = {
   id: number; symbol: string; side: string; qty: number; status: string; reason: string | null
   decidedOn: string; fillPrice: number | null; fees: number | null; amount?: number | null
+  triggerPrice?: number | null; triggerDir?: string | null; source?: string | null
+}
+type Analysis = {
+  performance: { pnl: number; returnPct: number; benchmarkPct: number | null; alphaPts: number | null; bestDay: string | null; bestDayPct: number | null; worstDay: string | null; worstDayPct: number | null; maxDrawdownPct: number; daysTracked: number }
+  cashPct: number; coinsPct: number
+  coins: { symbol: string; qty: number; price: number | null; value: number; sharePct: number; avgCost: number | null; unrealized: number; realized: number; fees: number; trades: number }[]
+  trades: { trades: number; buys: number; sells: number; fees: number; realized: number; winRatePct: number | null; avgWin: number | null; avgLoss: number | null; bestTrade: number | null; worstTrade: number | null }
+  ai: { executed: number; declined: number; cancelled: number; acceptancePct: number | null; bySource: { source: string; filled: number; sells: number; realized: number }[] }
 }
 type PaperView = {
   cash: number; startCash: number; startBenchmark: number | null; equity: number; returnPct: number; benchmarkPct: number | null
@@ -18,6 +26,7 @@ type PaperView = {
 type LiveView = {
   equity: number; cash: number; returnPct: number; benchmarkPct: number | null; benchmarkPrice: number | null
   positions: { symbol: string; price: number | null; value: number | null; pnl: number | null }[]
+  prices: Record<string, number>
   asOf: string
 }
 
@@ -29,6 +38,10 @@ const inr = (n: number) => n.toLocaleString('en-IN', { style: 'currency', curren
 const qtyText = (n: number) => n.toLocaleString('en-IN', { maximumFractionDigits: 8 })
 const pctText = (n: number) => `${n >= 0 ? '+' : ''}${n.toFixed(2)}%`
 const sleep = (ms: number) => new Promise(r => setTimeout(r, ms))
+const COINS = ['BTC', 'ETH', 'BNB', 'XRP', 'SOL', 'DOGE', 'ADA', 'AVAX', 'DOT', 'LINK']
+const signedInr = (n: number) => `${n >= 0 ? '+' : '-'}${inr(Math.abs(n))}`
+const tone = (n: number | null | undefined): 'up' | 'down' | undefined => (n == null || n === 0 ? undefined : n > 0 ? 'up' : 'down')
+const coinColor = (symbol: string) => PALETTE[[...symbol].reduce((a, c) => a + c.charCodeAt(0), 0) % PALETTE.length]
 
 declare global {
   interface Window { google?: any }
@@ -166,8 +179,11 @@ function Login({ onLogin }: { onLogin: () => void }) {
 }
 
 function Coin({ symbol }: { symbol: string }) {
-  const i = [...symbol].reduce((a, c) => a + c.charCodeAt(0), 0) % PALETTE.length
-  return <span className="coin" style={{ background: PALETTE[i] }}>{symbol.slice(0, 3)}</span>
+  return <span className="coin" style={{ background: coinColor(symbol) }}>{symbol.slice(0, 3)}</span>
+}
+
+function Stat({ label, value, tone: t }: { label: string; value: string; tone?: 'up' | 'down' }) {
+  return <div className="stat"><small>{label}</small><b className={t ?? ''}>{value}</b></div>
 }
 
 function Chart({ view, live }: { view: PaperView; live: LiveView | null }) {
@@ -224,6 +240,13 @@ function Dashboard({ showToast }: { showToast: (t: { msg: string }) => void }) {
   const [amount, setAmount] = useState('10000')
   const [extra, setExtra] = useState('')
   const [strategy, setStrategy] = useState('')
+  const [analysis, setAnalysis] = useState<Analysis | null>(null)
+  const [tCoin, setTCoin] = useState('BTC')
+  const [tSide, setTSide] = useState<'BUY' | 'SELL'>('BUY')
+  const [tMode, setTMode] = useState<'now' | 'price'>('now')
+  const [tAmount, setTAmount] = useState('')
+  const [tPercent, setTPercent] = useState(100)
+  const [tPrice, setTPrice] = useState('')
   const slow = useSlow(status === null)
   const [live, setLive] = useState<LiveView | null>(null)
   const [liveOk, setLiveOk] = useState(true)
@@ -266,12 +289,13 @@ function Dashboard({ showToast }: { showToast: (t: { msg: string }) => void }) {
     const st = await (await api(`${BASE}/status`)).json()
     setStatus(st)
     if (st.started) {
-      const res = await api(BASE)
+      const [res, an] = await Promise.all([api(BASE), api(`${BASE}/analysis`)])
       if (res.ok) {
         const v: PaperView = await res.json()
         setView(v)
         setStrategy(s => (s === '' ? v.strategy ?? '' : s))
       }
+      if (an.ok) setAnalysis(await an.json())
     } else {
       setView(null)
     }
@@ -289,7 +313,8 @@ function Dashboard({ showToast }: { showToast: (t: { msg: string }) => void }) {
     try {
       const res = await api(path, { method: 'POST', ...(body ? { body: JSON.stringify(body) } : {}) })
       if (!res.ok) {
-        const msg = res.status === 400 ? 'Enter an amount between 1,000 and 1,00,00,000.' : 'Something went wrong. Please try again.'
+        const body = await res.json().catch(() => ({}))
+        const msg = res.status === 400 ? body.message || 'Please check the values and try again.' : 'Something went wrong. Please try again.'
         return showToast({ msg })
       }
       const msg = ok ?? (await res.json().catch(() => ({}))).message
@@ -344,7 +369,20 @@ function Dashboard({ showToast }: { showToast: (t: { msg: string }) => void }) {
   }
 
   const suggestions = view.orders.filter(o => o.status === 'SUGGESTED')
-  const history = view.orders.filter(o => o.status !== 'SUGGESTED')
+  const watchingOrders = view.orders.filter(o => o.status === 'WATCHING')
+  const history = view.orders.filter(o => o.status !== 'SUGGESTED' && o.status !== 'WATCHING')
+  const prices = live?.prices ?? {}
+  const tPriceNow = prices[tCoin] ?? null
+  const tHeld = view.positions.find(p => p.symbol === tCoin)
+  const submitTrade = async () => {
+    const body: Record<string, unknown> = { side: tSide, symbol: tCoin }
+    if (tSide === 'BUY') body.amount = Number(tAmount)
+    else body.percent = tPercent
+    if (tMode === 'price') body.price = Number(tPrice)
+    await act(`${BASE}/${tMode === 'price' ? 'trigger' : 'trade'}`, undefined, body)
+    setTAmount('')
+    setTPrice('')
+  }
   const equity = live?.equity ?? view.equity
   const cash = live?.cash ?? view.cash
   const returnPct = live?.returnPct ?? view.returnPct
@@ -371,11 +409,49 @@ function Dashboard({ showToast }: { showToast: (t: { msg: string }) => void }) {
         <Chart view={view} live={live} />
       </section>
 
+      <Section title="Performance analysis" hint="Return, risk, best and worst day">
+        {analysis ? (
+          <>
+            <div className="stats">
+              <Stat label="Profit / loss" value={signedInr(analysis.performance.pnl)} tone={tone(analysis.performance.pnl)} />
+              <Stat label="Return" value={pctText(analysis.performance.returnPct)} tone={tone(analysis.performance.returnPct)} />
+              <Stat label="Bitcoin return" value={analysis.performance.benchmarkPct == null ? 'n/a' : pctText(analysis.performance.benchmarkPct)} />
+              <Stat label="Versus Bitcoin" value={analysis.performance.alphaPts == null ? 'n/a' : `${analysis.performance.alphaPts >= 0 ? '+' : ''}${analysis.performance.alphaPts.toFixed(2)} pts`} tone={tone(analysis.performance.alphaPts)} />
+              <Stat label="Biggest fall" value={`-${analysis.performance.maxDrawdownPct.toFixed(2)}%`} />
+              <Stat label="Days tracked" value={String(analysis.performance.daysTracked)} />
+              <Stat label="Best day" value={analysis.performance.bestDay ? `${pctText(analysis.performance.bestDayPct ?? 0)} (${analysis.performance.bestDay})` : 'n/a'} />
+              <Stat label="Worst day" value={analysis.performance.worstDay ? `${pctText(analysis.performance.worstDayPct ?? 0)} (${analysis.performance.worstDay})` : 'n/a'} />
+            </div>
+            <small className="muted">Biggest fall is the largest drop from a peak your portfolio value reached. Best and worst day use the daily snapshots, so they fill in as days pass.</small>
+          </>
+        ) : <p className="muted small">Collecting data...</p>}
+      </Section>
+
       <div className="tiles">
         <div className="tile"><small>Cash</small><b>{inr(cash)}</b></div>
         <div className="tile"><small>In coins</small><b>{inr(holdingsValue)}</b></div>
         <div className="tile"><small>Started with</small><b>{inr(view.startCash)}</b></div>
       </div>
+
+      <Section title="Allocation analysis" hint="Where your money sits">
+        {analysis ? (
+          <>
+            <div className="alloc" role="img" aria-label="Portfolio allocation">
+              <span className="seg cash" style={{ width: `${analysis.cashPct}%` }} />
+              {analysis.coins.filter(c => c.sharePct > 0).map(c => <span key={c.symbol} className="seg" style={{ width: `${c.sharePct}%`, background: coinColor(c.symbol) }} />)}
+            </div>
+            <div className="legend-list">
+              <div><i className="dot cash" /> Cash <b>{analysis.cashPct.toFixed(1)}%</b></div>
+              {analysis.coins.filter(c => c.sharePct > 0).map(c => <div key={c.symbol}><i className="dot" style={{ background: coinColor(c.symbol) }} /> {c.symbol} <b>{c.sharePct.toFixed(1)}%</b></div>)}
+            </div>
+            <small className="muted">
+              {analysis.coins.find(c => c.sharePct > 0)
+                ? `Your biggest position is ${analysis.coins.find(c => c.sharePct > 0)?.symbol} at ${analysis.coins.find(c => c.sharePct > 0)?.sharePct.toFixed(1)}% of the portfolio. The AI never puts more than 35% into one coin.`
+                : 'You are fully in cash right now.'}
+            </small>
+          </>
+        ) : <p className="muted small">Collecting data...</p>}
+      </Section>
 
       <section className="card ai">
         <div className="ai-head">
@@ -395,6 +471,23 @@ function Dashboard({ showToast }: { showToast: (t: { msg: string }) => void }) {
         <button className="btn primary" disabled={busy} onClick={() => act(`${BASE}/run`)}>{busy ? 'Asking the AI...' : 'Ask the AI now'}</button>
       </section>
 
+      <Section title="AI performance" hint="How its trades have gone">
+        {analysis ? (
+          <>
+            <div className="stats">
+              <Stat label="AI trades done" value={String(analysis.ai.executed)} />
+              <Stat label="You declined" value={String(analysis.ai.declined)} />
+              <Stat label="Expired or replaced" value={String(analysis.ai.cancelled)} />
+              <Stat label="You accepted" value={analysis.ai.acceptancePct == null ? 'n/a' : `${analysis.ai.acceptancePct.toFixed(0)}%`} />
+              {analysis.ai.bySource.map(src => (
+                <Stat key={src.source} label={`${src.source === 'USER' ? 'Your' : 'AI'} realised profit`} value={signedInr(src.realized)} tone={tone(src.realized)} />
+              ))}
+            </div>
+            <small className="muted">Realised profit counts only trades you have closed by selling, after fees. Profit on coins you still hold is under Coin analysis.</small>
+          </>
+        ) : <p className="muted small">Collecting data...</p>}
+      </Section>
+
       {suggestions.length > 0 && (
         <section className="stack">
           <h3 className="section-title">Waiting for your decision <span className="count">{suggestions.length}</span></h3>
@@ -409,6 +502,76 @@ function Dashboard({ showToast }: { showToast: (t: { msg: string }) => void }) {
                 <button className="btn primary" disabled={busy} onClick={() => act(`${BASE}/orders/${o.id}/approve`, 'Approved and filled at the live price')}>Approve</button>
                 <button className="btn" disabled={busy} onClick={() => act(`${BASE}/orders/${o.id}/decline`, 'Declined')}>Decline</button>
               </div>
+            </div>
+          ))}
+        </section>
+      )}
+
+      <Section title="Your own trade" hint="Custom entry or exit" defaultOpen>
+        <div className="chips">
+          <button type="button" className={`chip ${tSide === 'BUY' ? 'on' : ''}`} onClick={() => setTSide('BUY')}>Buy (entry)</button>
+          <button type="button" className={`chip ${tSide === 'SELL' ? 'on' : ''}`} onClick={() => setTSide('SELL')}>Sell (exit)</button>
+          <span className="spacer" />
+          <button type="button" className={`chip ${tMode === 'now' ? 'on' : ''}`} onClick={() => setTMode('now')}>Now</button>
+          <button type="button" className={`chip ${tMode === 'price' ? 'on' : ''}`} onClick={() => setTMode('price')}>At my price</button>
+        </div>
+        <label className="field">
+          <span>Coin</span>
+          <select value={tCoin} onChange={e => setTCoin(e.target.value)} aria-label="Coin">
+            {COINS.map(c => <option key={c} value={c}>{c}{prices[c] != null ? `  ·  ${inr(prices[c])}` : ''}</option>)}
+          </select>
+        </label>
+        {tSide === 'BUY' ? (
+          <label className="field">
+            <span>Amount to spend</span>
+            <div className="input-wrap">
+              <b>₹</b>
+              <input inputMode="decimal" value={tAmount} onChange={e => setTAmount(e.target.value.replace(/[^0-9.]/g, ''))} placeholder="1000" aria-label="Amount to spend" />
+            </div>
+            <div className="chips">
+              {[500, 1000, 2500].map(v => <button key={v} type="button" className="chip" onClick={() => setTAmount(String(v))}>{inr(v).replace('.00', '')}</button>)}
+              <button type="button" className="chip" onClick={() => setTAmount(String(Math.floor(cash / 1.002)))}>All cash</button>
+            </div>
+          </label>
+        ) : (
+          <div className="field">
+            <span>How much of your {tCoin} to sell {tHeld ? `(you hold ${qtyText(tHeld.qty)})` : '(you hold none)'}</span>
+            <div className="chips">
+              {[25, 50, 75, 100].map(v => <button key={v} type="button" className={`chip ${tPercent === v ? 'on' : ''}`} onClick={() => setTPercent(v)}>{v}%</button>)}
+            </div>
+          </div>
+        )}
+        {tMode === 'price' && (
+          <label className="field">
+            <span>Trigger price {tPriceNow != null && <small className="muted">(now {inr(tPriceNow)})</small>}</span>
+            <div className="input-wrap">
+              <b>₹</b>
+              <input inputMode="decimal" value={tPrice} onChange={e => setTPrice(e.target.value.replace(/[^0-9.]/g, ''))} placeholder="Price to wait for" aria-label="Trigger price" />
+            </div>
+            <small className="muted">
+              {tPrice && tPriceNow != null
+                ? `${tSide === 'BUY' ? 'Buys' : 'Sells'} when ${tCoin} ${Number(tPrice) > tPriceNow ? 'rises to' : 'falls to'} ${inr(Number(tPrice))}${tSide === 'SELL' ? (Number(tPrice) > tPriceNow ? ' (take profit)' : ' (stop loss)') : (Number(tPrice) < tPriceNow ? ' (buy the dip)' : ' (breakout entry)')}.`
+                : 'Pick a price above the current price to wait for a rise, or below it to wait for a fall.'}
+            </small>
+          </label>
+        )}
+        <button className="btn primary" disabled={busy || (tSide === 'BUY' && !tAmount) || (tMode === 'price' && !tPrice)} onClick={submitTrade}>
+          {tMode === 'now' ? (tSide === 'BUY' ? `Buy ${tCoin} now` : `Sell ${tPercent}% of ${tCoin} now`) : `Watch ${tCoin} and ${tSide === 'BUY' ? 'buy' : 'sell'}`}
+        </button>
+        <small className="muted">Orders at the live price fill instantly with a small cost and slippage. Price orders are checked every few seconds while the server is awake, and need the cash or coins to be there when they trigger.</small>
+      </Section>
+
+      {watchingOrders.length > 0 && (
+        <section className="stack">
+          <h3 className="section-title">Waiting for your price <span className="count">{watchingOrders.length}</span></h3>
+          {watchingOrders.map(o => (
+            <div key={o.id} className="card suggestion">
+              <div className="row between">
+                <div className="row gap"><Coin symbol={o.symbol} /><div><b>{o.side === 'BUY' ? 'Buy' : 'Sell'} {o.symbol}</b><small className="muted block">{o.side === 'BUY' ? `about ${inr(o.amount ?? 0)}` : `${qtyText(o.qty)} coins`} when price {o.triggerDir === 'ABOVE' ? 'rises to' : 'falls to'} {o.triggerPrice != null ? inr(o.triggerPrice) : ''}</small></div></div>
+                <span className="badge suggested">watching</span>
+              </div>
+              {prices[o.symbol] != null && <small className="muted">Now {inr(prices[o.symbol])}</small>}
+              <button className="btn" disabled={busy} onClick={() => act(`${BASE}/orders/${o.id}/cancel`, 'Order cancelled')}>Cancel order</button>
             </div>
           ))}
         </section>
@@ -434,17 +597,52 @@ function Dashboard({ showToast }: { showToast: (t: { msg: string }) => void }) {
         })}
       </section>
 
+      <Section title="Coin analysis" hint="Share, profit and trades per coin">
+        {analysis && analysis.coins.length > 0 ? analysis.coins.map(c => (
+          <div key={c.symbol} className="activity">
+            <div className="row between">
+              <div className="row gap"><Coin symbol={c.symbol} /><b>{c.symbol}</b></div>
+              <span className="muted small">{c.sharePct.toFixed(1)}% of portfolio</span>
+            </div>
+            <div className="stats three">
+              <Stat label="Unrealised" value={signedInr(c.unrealized)} tone={tone(c.unrealized)} />
+              <Stat label="Realised" value={signedInr(c.realized)} tone={tone(c.realized)} />
+              <Stat label="Fees paid" value={inr(c.fees)} />
+            </div>
+            <small className="muted">{c.trades} trades{c.avgCost != null ? ` · average cost ${inr(c.avgCost)}` : ''}</small>
+          </div>
+        )) : <p className="muted small">{analysis ? 'No coins traded yet.' : 'Collecting data...'}</p>}
+      </Section>
+
       <Section title="Recent activity" hint={history.length ? `${history.length} trades` : undefined}>
         {history.length === 0 && <p className="muted small">Nothing yet.</p>}
         {history.map(o => (
           <div key={o.id} className="activity">
             <div className="row between">
-              <div className="row gap"><Coin symbol={o.symbol} /><div><b>{o.side === 'BUY' ? 'Bought' : 'Sold'} {o.symbol}</b><small className="muted block">{o.decidedOn}{o.fillPrice != null ? ` · at ${inr(o.fillPrice)}` : ''}</small></div></div>
+              <div className="row gap"><Coin symbol={o.symbol} /><div><b>{o.side === 'BUY' ? 'Bought' : 'Sold'} {o.symbol}</b><small className="muted block">{o.source === 'USER' ? 'You' : 'AI'} · {o.decidedOn}{o.fillPrice != null ? ` · at ${inr(o.fillPrice)}` : ''}</small></div></div>
               <span className={`badge ${o.status.toLowerCase()}`}>{o.status.toLowerCase()}</span>
             </div>
             {o.reason && <small className="muted">{o.reason}</small>}
           </div>
         ))}
+      </Section>
+
+      <Section title="Trade statistics" hint="Fees, wins and losses">
+        {analysis ? (
+          <>
+            <div className="stats">
+              <Stat label="Trades" value={`${analysis.trades.trades} (${analysis.trades.buys} buys, ${analysis.trades.sells} sells)`} />
+              <Stat label="Fees paid" value={inr(analysis.trades.fees)} />
+              <Stat label="Realised profit" value={signedInr(analysis.trades.realized)} tone={tone(analysis.trades.realized)} />
+              <Stat label="Win rate" value={analysis.trades.winRatePct == null ? 'n/a' : `${analysis.trades.winRatePct.toFixed(0)}%`} />
+              <Stat label="Average win" value={analysis.trades.avgWin == null ? 'n/a' : signedInr(analysis.trades.avgWin)} tone={tone(analysis.trades.avgWin)} />
+              <Stat label="Average loss" value={analysis.trades.avgLoss == null ? 'n/a' : signedInr(analysis.trades.avgLoss)} tone={tone(analysis.trades.avgLoss)} />
+              <Stat label="Best sell" value={analysis.trades.bestTrade == null ? 'n/a' : signedInr(analysis.trades.bestTrade)} tone={tone(analysis.trades.bestTrade)} />
+              <Stat label="Worst sell" value={analysis.trades.worstTrade == null ? 'n/a' : signedInr(analysis.trades.worstTrade)} tone={tone(analysis.trades.worstTrade)} />
+            </div>
+            <small className="muted">Win rate and averages only count sells, because a trade is only a win or a loss once you close it.</small>
+          </>
+        ) : <p className="muted small">Collecting data...</p>}
       </Section>
 
       <Section title="My strategy" hint="Tell the AI how to trade">
