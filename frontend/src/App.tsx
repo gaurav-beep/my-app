@@ -660,9 +660,9 @@ function Dashboard({ showToast }: { showToast: (t: { msg: string }) => void }) {
               <input type="checkbox" checked={view.notifyEmail} disabled={busy} aria-label="Email me about trades"
                 onChange={e => act(`${BASE}/notify`, e.target.checked ? 'Email alerts on' : 'Email alerts off', { enabled: e.target.checked })} />
               <span className="track"><span className="knob" /></span>
-              <span className="switch-label">Email me when the AI trades or suggests a trade</span>
+              <span className="switch-label">Email me about trades</span>
             </label>
-            <small className="muted">Emails go to the Google address you signed in with. They also cover your own price orders when they trigger. Check your spam folder the first time.</small>
+            <small className="muted">You get an email when the AI trades or suggests a trade, when one of your price orders triggers, and when you place a trade yourself. Emails go to the Google address you signed in with. Check your spam folder the first time.</small>
             <button className="btn" disabled={busy} onClick={() => act(`${BASE}/notify/test`)}>Send a test email</button>
           </>
         ) : <p className="muted small">Email alerts are not set up on the server yet.</p>}

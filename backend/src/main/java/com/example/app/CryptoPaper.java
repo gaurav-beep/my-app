@@ -433,6 +433,7 @@ class CryptoEngine {
         o.reason = "Your order";
         o = orders.save(o);
         fill(a, o, pos);
+        if ("FILLED".equals(o.status)) notifyTrades(a, List.of(o), "You placed this trade.");
         return "FILLED".equals(o.status) ? (side.equals("BUY") ? "Bought " : "Sold ") + o.qty.stripTrailingZeros().toPlainString() + " " + symbol + " at the live price"
             : "Order not filled" + (o.reason == null ? "" : ": " + o.reason);
     }
