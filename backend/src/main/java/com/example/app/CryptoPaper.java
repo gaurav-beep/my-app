@@ -440,6 +440,11 @@ class CryptoEngine {
     }
 }
 
+record LivePosition(String symbol, BigDecimal price, BigDecimal value, BigDecimal pnl) {}
+
+record LiveView(BigDecimal equity, BigDecimal cash, BigDecimal returnPct, BigDecimal benchmarkPct, BigDecimal benchmarkPrice,
+                List<LivePosition> positions, String asOf) {}
+
 @RestController
 @RequestMapping("/api/crypto-paper")
 class CryptoPaperController {
@@ -508,6 +513,25 @@ class CryptoPaperController {
     @PostMapping("/run")
     Map<String, String> run(@AuthenticationPrincipal Jwt jwt) {
         return Map.of("message", engine.decide(account(jwt), true));
+    }
+
+    @GetMapping("/live")
+    LiveView live(@AuthenticationPrincipal Jwt jwt) {
+        CryptoAccount a = account(jwt);
+        List<CryptoPosition> pos = positions.findByUserId(a.userId);
+        List<LivePosition> lp = new ArrayList<>();
+        for (CryptoPosition p : pos) {
+            BigDecimal px = engine.price(p.symbol);
+            BigDecimal value = px == null ? null : px.multiply(p.qty).setScale(2, RoundingMode.HALF_UP);
+            BigDecimal pnl = value == null ? null : value.subtract(p.avgCost.multiply(p.qty)).setScale(2, RoundingMode.HALF_UP);
+            lp.add(new LivePosition(p.symbol, px, value, pnl));
+        }
+        BigDecimal equity = engine.equity(a, pos);
+        BigDecimal ret = equity.subtract(a.startCash).multiply(BigDecimal.valueOf(100)).divide(a.startCash, 2, RoundingMode.HALF_UP);
+        BigDecimal bench = engine.price(CryptoEngine.BENCHMARK);
+        BigDecimal benchPct = a.startBenchmark == null || bench == null || a.startBenchmark.signum() == 0 ? null
+            : bench.subtract(a.startBenchmark).multiply(BigDecimal.valueOf(100)).divide(a.startBenchmark, 2, RoundingMode.HALF_UP);
+        return new LiveView(equity, a.cash, ret, benchPct, bench, lp, java.time.Instant.now().toString());
     }
 
     @GetMapping

@@ -15,6 +15,12 @@ type PaperView = {
   lastSummary: string | null; lastDecisionOn: string | null; autoTrade: boolean; strategy: string | null
 }
 
+type LiveView = {
+  equity: number; cash: number; returnPct: number; benchmarkPct: number | null; benchmarkPrice: number | null
+  positions: { symbol: string; price: number | null; value: number | null; pnl: number | null }[]
+  asOf: string
+}
+
 const BASE = '/crypto-paper'
 const WAKING = 'Waking up the server. This can take up to a minute the first time...'
 const PALETTE = ['#f7931a', '#627eea', '#f3ba2f', '#3b82f6', '#14b8a6', '#c2a633', '#8b5cf6', '#ef4444', '#ec4899', '#2a5ada']
@@ -66,6 +72,19 @@ function useSlow(active: boolean, ms = 3000) {
     return () => clearTimeout(t)
   }, [active, ms])
   return slow
+}
+
+function useFlash(value: number) {
+  const prev = useRef(value)
+  const [dir, setDir] = useState<'up' | 'down' | ''>('')
+  useEffect(() => {
+    if (value === prev.current) return
+    setDir(value > prev.current ? 'up' : 'down')
+    prev.current = value
+    const t = setTimeout(() => setDir(''), 800)
+    return () => clearTimeout(t)
+  }, [value])
+  return dir
 }
 
 function Logo() {
@@ -151,8 +170,12 @@ function Coin({ symbol }: { symbol: string }) {
   return <span className="coin" style={{ background: PALETTE[i] }}>{symbol.slice(0, 3)}</span>
 }
 
-function Chart({ view }: { view: PaperView }) {
-  const pts = [{ equity: view.startCash, benchmark: view.startBenchmark }, ...view.history]
+function Chart({ view, live }: { view: PaperView; live: LiveView | null }) {
+  const pts = [
+    { equity: view.startCash, benchmark: view.startBenchmark },
+    ...view.history,
+    ...(live ? [{ equity: live.equity, benchmark: live.benchmarkPrice }] : []),
+  ]
   if (pts.length < 2) return <p className="chart-empty">Your chart appears after the first daily snapshot.</p>
   const mine = pts.map(p => (p.equity / view.startCash) * 100)
   const bench = pts.map(p => (view.startBenchmark && p.benchmark ? (p.benchmark / view.startBenchmark) * 100 : NaN))
@@ -202,6 +225,42 @@ function Dashboard({ showToast }: { showToast: (t: { msg: string }) => void }) {
   const [extra, setExtra] = useState('')
   const [strategy, setStrategy] = useState('')
   const slow = useSlow(status === null)
+  const [live, setLive] = useState<LiveView | null>(null)
+  const [liveOk, setLiveOk] = useState(true)
+  const started = !!status?.started
+
+  useEffect(() => {
+    if (!started) return
+    let stop = false
+    let inflight = false
+    let fails = 0
+    const tick = async () => {
+      if (document.visibilityState !== 'visible' || inflight) return
+      inflight = true
+      try {
+        const res = await fetch(`/api${BASE}/live`, { headers: { Authorization: `Bearer ${localStorage.getItem('token') ?? ''}` } })
+        if (!res.ok) throw new Error(String(res.status))
+        const l: LiveView = await res.json()
+        if (!stop) {
+          setLive(l)
+          setLiveOk(true)
+        }
+        fails = 0
+      } catch {
+        fails++
+        if (fails >= 3 && !stop) setLiveOk(false)
+      } finally {
+        inflight = false
+      }
+    }
+    tick()
+    const t = setInterval(tick, 3000)
+    document.addEventListener('visibilitychange', tick)
+    return () => { stop = true; clearInterval(t); document.removeEventListener('visibilitychange', tick) }
+  }, [started])
+
+  const liveEquity = live?.equity ?? view?.equity ?? 0
+  const flash = useFlash(liveEquity)
 
   const load = useCallback(async () => {
     const st = await (await api(`${BASE}/status`)).json()
@@ -286,27 +345,34 @@ function Dashboard({ showToast }: { showToast: (t: { msg: string }) => void }) {
 
   const suggestions = view.orders.filter(o => o.status === 'SUGGESTED')
   const history = view.orders.filter(o => o.status !== 'SUGGESTED')
-  const diff = view.benchmarkPct == null ? null : view.returnPct - view.benchmarkPct
-  const holdingsValue = view.equity - view.cash
-  const up = view.returnPct >= 0
+  const equity = live?.equity ?? view.equity
+  const cash = live?.cash ?? view.cash
+  const returnPct = live?.returnPct ?? view.returnPct
+  const benchmarkPct = live ? live.benchmarkPct : view.benchmarkPct
+  const diff = benchmarkPct == null ? null : returnPct - benchmarkPct
+  const holdingsValue = equity - cash
+  const up = returnPct >= 0
+  const liveBySymbol = new Map((live?.positions ?? []).map(p => [p.symbol, p]))
+  const asOf = live ? new Date(live.asOf).toLocaleTimeString() : null
 
   return (
     <div className="stack">
       <section className="hero">
         <div className="hero-top">
-          <span>Portfolio value</span>
-          <span className={`pill ${up ? 'up' : 'down'}`}>{up ? '▲' : '▼'} {pctText(view.returnPct)}</span>
+          <span className="row gap-s">Portfolio value <span className={`live ${liveOk ? '' : 'off'}`}><i />{liveOk ? 'LIVE' : 'Reconnecting'}</span></span>
+          <span className={`pill ${up ? 'up' : 'down'}`}>{up ? '▲' : '▼'} {pctText(returnPct)}</span>
         </div>
-        <div className="hero-value">{inr(view.equity)}</div>
+        <div className={`hero-value flash-${flash}`}>{inr(equity)}</div>
         <div className="hero-sub">
-          {view.benchmarkPct != null && <span>Bitcoin {pctText(view.benchmarkPct)}</span>}
+          {benchmarkPct != null && <span>Bitcoin {pctText(benchmarkPct)}</span>}
           {diff != null && <span className="chip-soft">{diff >= 0 ? 'Beating Bitcoin by' : 'Behind Bitcoin by'} {Math.abs(diff).toFixed(2)} pts</span>}
+          {asOf && <span className="updated">Updated {asOf}</span>}
         </div>
-        <Chart view={view} />
+        <Chart view={view} live={live} />
       </section>
 
       <div className="tiles">
-        <div className="tile"><small>Cash</small><b>{inr(view.cash)}</b></div>
+        <div className="tile"><small>Cash</small><b>{inr(cash)}</b></div>
         <div className="tile"><small>In coins</small><b>{inr(holdingsValue)}</b></div>
         <div className="tile"><small>Started with</small><b>{inr(view.startCash)}</b></div>
       </div>
@@ -351,15 +417,21 @@ function Dashboard({ showToast }: { showToast: (t: { msg: string }) => void }) {
       <section className="stack">
         <h3 className="section-title">Your coins</h3>
         {view.positions.length === 0 && <div className="card empty"><b>No coins yet</b><small className="muted">Approve a suggestion, or turn on auto-trade, and your holdings show up here.</small></div>}
-        {view.positions.map(p => (
-          <div key={p.symbol} className="card holding">
-            <div className="row gap"><Coin symbol={p.symbol} /><div><b>{p.symbol}</b><small className="muted block">{qtyText(p.qty)} · avg {inr(p.avgCost)}</small></div></div>
-            <div className="right">
-              <b>{p.value != null ? inr(p.value) : 'n/a'}</b>
-              {p.pnl != null && <span className={`pnl ${p.pnl >= 0 ? 'up' : 'down'}`}>{p.pnl >= 0 ? '+' : '-'}{inr(Math.abs(p.pnl))}</span>}
+        {view.positions.map(p => {
+          const lp = liveBySymbol.get(p.symbol)
+          const price = lp?.price ?? p.price
+          const value = lp?.value ?? p.value
+          const pnl = lp?.pnl ?? p.pnl
+          return (
+            <div key={p.symbol} className="card holding">
+              <div className="row gap"><Coin symbol={p.symbol} /><div><b>{p.symbol}</b><small className="muted block">{qtyText(p.qty)} · now {price != null ? inr(price) : 'n/a'}</small></div></div>
+              <div className="right">
+                <b>{value != null ? inr(value) : 'n/a'}</b>
+                {pnl != null && <span className={`pnl ${pnl >= 0 ? 'up' : 'down'}`}>{pnl >= 0 ? '+' : '-'}{inr(Math.abs(pnl))}</span>}
+              </div>
             </div>
-          </div>
-        ))}
+          )
+        })}
       </section>
 
       <Section title="Recent activity" hint={history.length ? `${history.length} trades` : undefined}>

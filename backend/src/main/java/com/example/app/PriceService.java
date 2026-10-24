@@ -70,7 +70,7 @@ class PriceService {
     }
 
     private synchronized Map<String, BigDecimal> dcxTicker() {
-        if (dcxFetchedAt.plusSeconds(60).isAfter(Instant.now())) return dcxTickers;
+        if (dcxFetchedAt.plusMillis(2500).isAfter(Instant.now())) return dcxTickers;
         try {
             JsonNode n = dcx.get().uri("/exchange/ticker").retrieve().body(JsonNode.class);
             Map<String, BigDecimal> m = new HashMap<>();
