@@ -13,6 +13,8 @@ import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
+import java.util.Set;
+import java.util.concurrent.ConcurrentHashMap;
 
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -57,6 +59,14 @@ class CryptoAccount {
     BigDecimal stopLossPct = new BigDecimal("5");
     @Column(name = "take_profit_pct")
     BigDecimal takeProfitPct = new BigDecimal("10");
+    @Column(name = "check_minutes")
+    int checkMinutes = 60;
+    @Column(name = "events_on")
+    boolean eventsOn = true;
+    @Column(name = "calls_day")
+    LocalDate callsDay;
+    @Column(name = "calls_count")
+    int callsCount;
 }
 
 @Entity
@@ -151,7 +161,6 @@ class CryptoEngine {
     static final BigDecimal FEE_RATE = new BigDecimal("0.002");
     static final BigDecimal SLIPPAGE = new BigDecimal("0.001");
     static final BigDecimal MIN_TRADE = new BigDecimal("200");
-    static final Duration DECISION_EVERY = Duration.ofHours(4);
     private static final ZoneId IST = ZoneId.of("Asia/Kolkata");
     private static final Logger log = LoggerFactory.getLogger(CryptoEngine.class);
 
@@ -163,10 +172,12 @@ class CryptoEngine {
     private final LlmClient llm;
     private final Notifier notifier;
     private final Sentiment sentiment;
+    private final MarketWatch marketWatch;
 
     CryptoEngine(CryptoAccountRepository accounts, CryptoPositionRepository positions, CryptoOrderRepository orders,
-                 CryptoSnapshotRepository snapshots, PriceService prices, LlmClient llm, Notifier notifier, Sentiment sentiment) {
+                 CryptoSnapshotRepository snapshots, PriceService prices, LlmClient llm, Notifier notifier, Sentiment sentiment, MarketWatch marketWatch) {
         this.sentiment = sentiment;
+        this.marketWatch = marketWatch;
         this.accounts = accounts;
         this.positions = positions;
         this.orders = orders;
@@ -562,11 +573,26 @@ class CryptoEngine {
         reject(o, "[declined]");
     }
 
+    static final int MAX_CALLS_PER_DAY = 24;
+    static final Set<Integer> CHECK_CHOICES = Set.of(30, 60, 120, 240);
+    final Set<Long> eventTargets = ConcurrentHashMap.newKeySet();
+
     String decide(CryptoAccount a, boolean manual) {
+        return decide(a, manual, null);
+    }
+
+    synchronized String decide(CryptoAccount a, boolean manual, String trigger) {
         if (!llm.enabled()) return "The AI is not set up on the server yet.";
         LocalDateTime now = LocalDateTime.now(ZoneOffset.UTC);
-        if (a.lastAttemptAt != null && a.lastAttemptAt.isAfter(now.minusMinutes(manual ? 2 : 60))) return "Tried recently. Please wait a bit.";
+        if (a.lastAttemptAt != null && a.lastAttemptAt.isAfter(now.minusMinutes(manual ? 2 : trigger != null ? 10 : 15))) return "Tried recently. Please wait a bit.";
         if (manual && a.lastDecisionAt != null && a.lastDecisionAt.isAfter(now.minusMinutes(15))) return "The AI decided less than 15 minutes ago.";
+        LocalDate today = LocalDate.now(ZoneOffset.UTC);
+        if (!today.equals(a.callsDay)) {
+            a.callsDay = today;
+            a.callsCount = 0;
+        }
+        if (a.callsCount >= MAX_CALLS_PER_DAY) return "The AI has reached its limit of " + MAX_CALLS_PER_DAY + " checks for today. It resets at midnight UTC.";
+        a.callsCount++;
         a.lastAttemptAt = now;
         accounts.save(a);
 
@@ -580,6 +606,7 @@ class CryptoEngine {
         }
         String sentimentText = sentiment.block();
         if (!sentimentText.isBlank()) lines.add("\n" + sentimentText);
+        if (trigger != null) lines.add("\nMarket alert that triggered this check: " + trigger + ".\n");
         if (last.size() < 5) return "Market data is unavailable right now.";
 
         List<CryptoPosition> pos = new ArrayList<>(positions.findByUserId(a.userId));
@@ -665,10 +692,36 @@ class CryptoEngine {
             try {
                 liquidateShorts(a);
                 snapshot(a);
-                if (a.lastDecisionAt == null || a.lastDecisionAt.isBefore(now.minus(DECISION_EVERY))) decide(a, false);
+                if (a.eventsOn) eventTargets.add(a.userId);
+                else eventTargets.remove(a.userId);
+                if (a.lastDecisionAt == null || a.lastDecisionAt.isBefore(now.minusMinutes(Math.max(a.checkMinutes - 5, 10)))) decide(a, false);
             } catch (Exception e) {
                 log.warn("Crypto paper step failed for user {}: {}", a.userId, e.toString());
             }
+        }
+    }
+
+    @Scheduled(initialDelay = 240000, fixedDelay = 300000)
+    void watchMarket() {
+        if (eventTargets.isEmpty()) return;
+        try {
+            List<MarketWatch.Signal> all = new ArrayList<>();
+            for (String coin : UNIVERSE) {
+                BigDecimal px = price(coin);
+                if (px != null) all.addAll(MarketWatch.signals(coin, px, prices.candles(coin, "1h", 100), prices.candles(coin, "1d", 60)));
+            }
+            List<String> events = marketWatch.fresh(all);
+            if (events.isEmpty()) return;
+            String why = String.join("; ", events.subList(0, Math.min(events.size(), 4)));
+            LocalDateTime now = LocalDateTime.now(ZoneOffset.UTC);
+            for (Long uid : List.copyOf(eventTargets)) {
+                CryptoAccount a = accounts.findById(uid).orElse(null);
+                if (a == null || !a.eventsOn || (a.lastDecisionAt != null && a.lastDecisionAt.isAfter(now.minusMinutes(20)))) continue;
+                log.info("Market alert for user {}: {}", uid, why);
+                decide(a, false, why);
+            }
+        } catch (Exception e) {
+            log.warn("Market watch failed: {}", e.toString());
         }
     }
 }
@@ -742,6 +795,17 @@ class CryptoPaperController {
         a.stopLossPct = sl.setScale(2, RoundingMode.HALF_UP);
         a.takeProfitPct = tp.setScale(2, RoundingMode.HALF_UP);
         accounts.save(a);
+    }
+
+    @PostMapping("/schedule") @ResponseStatus(HttpStatus.NO_CONTENT)
+    void schedule(@AuthenticationPrincipal Jwt jwt, @RequestBody ScheduleIn in) {
+        CryptoAccount a = account(jwt);
+        if (!CryptoEngine.CHECK_CHOICES.contains(in.minutes())) throw new ResponseStatusException(HttpStatus.BAD_REQUEST, "Choose 30, 60, 120 or 240 minutes");
+        a.checkMinutes = in.minutes();
+        a.eventsOn = in.events();
+        accounts.save(a);
+        if (a.eventsOn) engine.eventTargets.add(a.userId);
+        else engine.eventTargets.remove(a.userId);
     }
 
     @PostMapping("/notify") @ResponseStatus(HttpStatus.NO_CONTENT)
@@ -853,6 +917,6 @@ class CryptoPaperController {
                 o.decidedOn, o.fillPrice, o.fees, o.amountInr, o.triggerPrice, o.triggerDir, o.source)).toList();
         List<SnapView> hv = snapshots.findByUserIdOrderByDayAsc(a.userId).stream().map(s -> new SnapView(s.day, s.equity, s.benchmark)).toList();
         LocalDate decided = a.lastDecisionAt == null ? null : a.lastDecisionAt.atZone(ZoneOffset.UTC).withZoneSameInstant(IST).toLocalDate();
-        return new PaperView(a.cash, a.startCash, a.startBenchmark, equity, ret, benchPct, pv, ov, hv, a.lastSummary, decided, a.autoTrade, a.strategy, a.notifyEmail, notifier.configured(), a.protectOn, a.stopLossPct, a.takeProfitPct);
+        return new PaperView(a.cash, a.startCash, a.startBenchmark, equity, ret, benchPct, pv, ov, hv, a.lastSummary, decided, a.autoTrade, a.strategy, a.notifyEmail, notifier.configured(), a.protectOn, a.stopLossPct, a.takeProfitPct, a.checkMinutes, a.eventsOn);
     }
 }

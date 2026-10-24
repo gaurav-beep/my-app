@@ -25,7 +25,8 @@ final class Indicators {
             gain = (gain * (n - 1) + Math.max(d, 0)) / n;
             loss = (loss * (n - 1) + Math.max(-d, 0)) / n;
         }
-        return loss == 0 ? 100.0 : 100 - 100 / (1 + gain / loss);
+        if (loss == 0) return gain == 0 ? 50.0 : 100.0;
+        return 100 - 100 / (1 + gain / loss);
     }
 
     static double sma(double[] c, int n) {

@@ -21,7 +21,7 @@ type PaperView = {
   orders: Order[]
   history: { day: string; equity: number; benchmark: number | null }[]
   lastSummary: string | null; lastDecisionOn: string | null; autoTrade: boolean; strategy: string | null
-  notifyEmail: boolean; emailConfigured: boolean; protectOn: boolean; stopLossPct: number; takeProfitPct: number
+  notifyEmail: boolean; emailConfigured: boolean; protectOn: boolean; stopLossPct: number; takeProfitPct: number; checkMinutes: number; eventsOn: boolean
 }
 
 type LiveView = {
@@ -660,6 +660,23 @@ function Dashboard({ showToast }: { showToast: (t: { msg: string }) => void }) {
           placeholder="For example: only trade BTC and ETH, buy after a 5% dip, sell when up 8%, never hold more than 2 coins." />
         <button className="btn" disabled={busy} onClick={() => act(`${BASE}/strategy`, 'Strategy saved', { text: strategy })}>Save strategy</button>
         <small className="muted">The AI reads this at its next check and tries to follow it. It is not a strict rules engine, and the safety limits always apply.</small>
+      </Section>
+
+      <Section title="AI schedule" hint={`Every ${view.checkMinutes >= 60 ? `${view.checkMinutes / 60} h` : `${view.checkMinutes} min`}${view.eventsOn ? ' + alerts' : ''}`}>
+        <label className="field">
+          <span>Regular check</span>
+          <select value={view.checkMinutes} disabled={busy} aria-label="How often the AI checks"
+            onChange={e => act(`${BASE}/schedule`, 'Schedule saved', { minutes: Number(e.target.value), events: view.eventsOn })}>
+            {[[30, 'Every 30 minutes'], [60, 'Every hour'], [120, 'Every 2 hours'], [240, 'Every 4 hours']].map(([m, l]) => <option key={m} value={m}>{l}</option>)}
+          </select>
+        </label>
+        <label className="switch">
+          <input type="checkbox" checked={view.eventsOn} disabled={busy} aria-label="Extra check on sharp market moves"
+            onChange={e => act(`${BASE}/schedule`, e.target.checked ? 'Market alerts on' : 'Market alerts off', { minutes: view.checkMinutes, events: e.target.checked })} />
+          <span className="track"><span className="knob" /></span>
+          <span className="switch-label">Also check when the market moves sharply</span>
+        </label>
+        <small className="muted">The server scans prices every 5 minutes without using the AI. It calls the AI early when a coin moves 3% in an hour or 7% in a day, hourly RSI goes below 25 or above 75, or a coin breaks its 30-day high or low. The AI is limited to 24 checks a day to protect the free Gemini quota. Checks run every 15 minutes at the earliest, and only while the server is awake.</small>
       </Section>
 
       <Section title="Protection for AI trades" hint={view.protectOn ? `Stop ${view.stopLossPct}% · Target ${view.takeProfitPct}%` : 'Off'}>

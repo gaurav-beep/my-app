@@ -1,0 +1,4 @@
+ALTER TABLE crypto_account ADD COLUMN check_minutes INTEGER NOT NULL DEFAULT 60;
+ALTER TABLE crypto_account ADD COLUMN events_on BOOLEAN NOT NULL DEFAULT TRUE;
+ALTER TABLE crypto_account ADD COLUMN calls_day DATE;
+ALTER TABLE crypto_account ADD COLUMN calls_count INTEGER NOT NULL DEFAULT 0;
