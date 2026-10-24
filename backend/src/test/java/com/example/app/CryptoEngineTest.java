@@ -46,19 +46,20 @@ class CryptoEngineTest {
         var out = CryptoEngine.validate(json("""
             {"orders":[
               {"side":"SHORT","symbol":"BTC","amount_inr":999999,"reason":"fall"},
-              {"side":"SHORT","symbol":"DOGE","amount_inr":500,"reason":"holds it"},
+              {"side":"SHORT","symbol":"DOGE","amount_inr":500,"reason":"hedge"},
               {"side":"COVER","symbol":"ETH","amount_inr":500,"reason":"no short"}]}"""),
             new BigDecimal("10000"), new BigDecimal("10000"), Map.of("DOGE", new BigDecimal("125")), LAST);
-        assertEquals(1, out.size());
+        assertEquals(2, out.size());
         assertEquals("SHORT", out.get(0).side());
         assertTrue(out.get(0).amount().compareTo(new BigDecimal("3500")) <= 0);
+        assertEquals("DOGE", out.get(1).symbol());
     }
 
     @Test
     void coveringAllMostOfAShortCoversItAll() throws Exception {
         var out = CryptoEngine.validate(json("""
             {"orders":[{"side":"COVER","symbol":"DOGE","amount_inr":990,"reason":"exit"}]}"""),
-            new BigDecimal("1000"), new BigDecimal("2000"), Map.of("DOGE", new BigDecimal("-125")), LAST);
+            new BigDecimal("1000"), new BigDecimal("2000"), Map.of("DOGE:SHORT", new BigDecimal("125")), LAST);
         assertEquals(1, out.size());
         assertEquals("COVER", out.get(0).side());
     }

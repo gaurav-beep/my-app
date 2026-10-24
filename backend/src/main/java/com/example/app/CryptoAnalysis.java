@@ -106,7 +106,7 @@ final class CryptoAnalysis {
         orders.sort(Comparator.comparing((CryptoOrder o) -> o.id));
         for (CryptoOrder o : orders) {
             if (!"FILLED".equals(o.status) || o.qty == null || o.fillPrice == null) continue;
-            Lot lot = lots.computeIfAbsent(o.symbol, k -> new Lot());
+            Lot lot = lots.computeIfAbsent(o.symbol + ("SHORT".equals(o.side) || "COVER".equals(o.side) ? ":S" : ""), k -> new Lot());
             Src src = sources.computeIfAbsent(o.source == null || "PROTECT".equals(o.source) ? "AI" : o.source, k -> new Src());
             BigDecimal fee = o.fees == null ? BigDecimal.ZERO : o.fees;
             BigDecimal value = o.qty.multiply(o.fillPrice);
@@ -144,20 +144,27 @@ final class CryptoAnalysis {
         // coins
         Set<String> symbols = new LinkedHashSet<>();
         for (CryptoPosition p : positions) symbols.add(p.symbol);
-        symbols.addAll(lots.keySet());
+        for (String k : lots.keySet()) symbols.add(k.replace(":S", ""));
         List<CoinStat> coins = new ArrayList<>();
         BigDecimal coinsValue = BigDecimal.ZERO;
         for (String sym : symbols) {
-            CryptoPosition pos = positions.stream().filter(p -> p.symbol.equals(sym)).findFirst().orElse(null);
-            Lot lot = lots.getOrDefault(sym, new Lot());
+            List<CryptoPosition> ps = positions.stream().filter(p -> p.symbol.equals(sym)).toList();
+            Lot longLot = lots.getOrDefault(sym, new Lot());
+            Lot shortLot = lots.getOrDefault(sym + ":S", new Lot());
             BigDecimal px = prices.get(sym);
-            BigDecimal qty = pos == null ? BigDecimal.ZERO : pos.qty;
-            BigDecimal value = px == null || pos == null ? BigDecimal.ZERO : CryptoEngine.value(pos, px);
+            BigDecimal qty = BigDecimal.ZERO;
+            BigDecimal value = BigDecimal.ZERO;
+            BigDecimal unrealized = BigDecimal.ZERO;
+            for (CryptoPosition p : ps) {
+                qty = p.isShort() ? qty.subtract(p.qty) : qty.add(p.qty);
+                if (px == null) continue;
+                value = value.add(CryptoEngine.value(p, px));
+                unrealized = unrealized.add(CryptoEngine.pnl(p, px));
+            }
             coinsValue = coinsValue.add(value);
-            BigDecimal unrealized = pos == null || px == null ? BigDecimal.ZERO : CryptoEngine.pnl(pos, px);
             double share = equity.signum() == 0 ? 0 : value.doubleValue() / equity.doubleValue() * 100;
-            coins.add(new CoinStat(sym, qty.stripTrailingZeros(), px, r(value), r(share), pos == null ? null : pos.avgCost.setScale(2, RoundingMode.HALF_UP),
-                r(unrealized), r(lot.realized), r(lot.fees), lot.trades));
+            coins.add(new CoinStat(sym, qty.stripTrailingZeros(), px, r(value), r(share), ps.size() == 1 ? ps.get(0).avgCost.setScale(2, RoundingMode.HALF_UP) : null,
+                r(unrealized), r(longLot.realized.add(shortLot.realized)), r(longLot.fees.add(shortLot.fees)), longLot.trades + shortLot.trades));
         }
         coins.sort(Comparator.comparing((CoinStat c) -> c.value()).reversed());
         double coinsPct = equity.signum() == 0 ? 0 : coinsValue.doubleValue() / equity.doubleValue() * 100;

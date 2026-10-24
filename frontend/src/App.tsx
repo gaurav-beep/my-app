@@ -26,7 +26,7 @@ type PaperView = {
 
 type LiveView = {
   equity: number; cash: number; returnPct: number; benchmarkPct: number | null; benchmarkPrice: number | null
-  positions: { symbol: string; price: number | null; value: number | null; pnl: number | null }[]
+  positions: { symbol: string; price: number | null; value: number | null; pnl: number | null; side: string }[]
   prices: Record<string, number>
   asOf: string
 }
@@ -397,7 +397,7 @@ function Dashboard({ showToast }: { showToast: (t: { msg: string }) => void }) {
   const diff = benchmarkPct == null ? null : returnPct - benchmarkPct
   const holdingsValue = equity - cash
   const up = returnPct >= 0
-  const liveBySymbol = new Map((live?.positions ?? []).map(p => [p.symbol, p]))
+  const liveBySymbol = new Map((live?.positions ?? []).map(p => [`${p.symbol}:${p.side}`, p]))
   const asOf = live ? new Date(live.asOf).toLocaleTimeString() : null
 
   return (
@@ -591,12 +591,12 @@ function Dashboard({ showToast }: { showToast: (t: { msg: string }) => void }) {
         <h3 className="section-title">Your coins</h3>
         {view.positions.length === 0 && <div className="card empty"><b>No coins yet</b><small className="muted">Approve a suggestion, or turn on auto-trade, and your holdings show up here.</small></div>}
         {view.positions.map(p => {
-          const lp = liveBySymbol.get(p.symbol)
+          const lp = liveBySymbol.get(`${p.symbol}:${p.side}`)
           const price = lp?.price ?? p.price
           const value = lp?.value ?? p.value
           const pnl = lp?.pnl ?? p.pnl
           return (
-            <div key={p.symbol} className="card holding">
+            <div key={`${p.symbol}:${p.side}`} className="card holding">
               <div className="row gap"><Coin symbol={p.symbol} /><div><b>{p.symbol}{p.side === 'SHORT' && <span className="badge sell short-tag">SHORT</span>}</b><small className="muted block">{qtyText(p.qty)}{p.side === 'SHORT' ? ` · entry ${inr(p.avgCost)}` : ''} · now {price != null ? inr(price) : 'n/a'}</small></div></div>
               <div className="right">
                 <b>{value != null ? inr(value) : 'n/a'}</b>

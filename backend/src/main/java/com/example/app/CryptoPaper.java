@@ -265,7 +265,7 @@ class CryptoEngine {
         sb.append("You manage a small long-only paper-trading portfolio of cryptocurrencies priced in Indian rupees. This is a simulation. ")
           .append("Crypto is very volatile and trades 24 hours a day. Be conservative: holding cash is a valid choice, and fewer trades are better because every trade has costs. ")
           .append("You are asked every few hours.\n\n");
-        sb.append("Rules:\n- No leverage. Use BUY to open and SELL to close a normal holding. You may also open a SHORT (a bet that the price will fall, it earns when the price drops and loses when it rises) with side SHORT, and close it with side COVER. A short is fully backed by cash and is closed automatically if it loses 90% of that cash. Never SHORT a coin you hold, and never BUY a coin you are short.\n")
+        sb.append("Rules:\n- No leverage. Use BUY to open and SELL to close a normal holding. You may also open a SHORT (a bet that the price will fall, it earns when the price drops and loses when it rises) with side SHORT, and close it with side COVER. A short is fully backed by cash and is closed automatically if it loses 90% of that cash. You may hold a long and a short in the same coin at the same time as a hedge, but a hedge cancels out most of the profit, so only do it for a clear reason.\n")
           .append("- At most ").append(MAX_ORDERS).append(" orders.\n")
           .append("- No single coin may exceed ").append(MAX_SHARE.multiply(BigDecimal.valueOf(100)).intValue()).append("% of total equity.\n")
           .append("- Each order is an amount in rupees (amount_inr) of at least ").append(MIN_TRADE).append(". Trades cost about ")
@@ -309,24 +309,20 @@ class CryptoEngine {
             if (!UNIVERSE.contains(symbol) || px == null || amount == null || amount.signum() <= 0
                 || !(side.equals("BUY") || side.equals("SELL") || side.equals("SHORT") || side.equals("COVER"))) continue;
             if (reason.length() > 300) reason = reason.substring(0, 300);
-            BigDecimal heldQty = qty.getOrDefault(symbol, BigDecimal.ZERO);
-            BigDecimal heldValue = heldQty.abs().multiply(px);
+            String key = side.equals("SHORT") || side.equals("COVER") ? symbol + ":SHORT" : symbol;
+            BigDecimal heldQty = qty.getOrDefault(key, BigDecimal.ZERO);
+            BigDecimal heldValue = heldQty.multiply(px);
             if (side.equals("SELL") || side.equals("COVER")) {
-                boolean covering = side.equals("COVER");
-                if (covering ? heldQty.signum() >= 0 : heldQty.signum() <= 0) continue;
+                if (heldQty.signum() <= 0) continue;
                 if (amount.compareTo(heldValue.multiply(new BigDecimal("0.98"))) >= 0 || heldValue.subtract(amount).compareTo(MIN_TRADE) < 0) amount = heldValue;
-                BigDecimal closed = amount.divide(px, 10, RoundingMode.DOWN);
-                qty.put(symbol, covering ? heldQty.add(closed).min(BigDecimal.ZERO) : heldQty.subtract(closed).max(BigDecimal.ZERO));
+                qty.put(key, heldQty.subtract(amount.divide(px, 10, RoundingMode.DOWN)).max(BigDecimal.ZERO));
             } else {
-                boolean shorting = side.equals("SHORT");
-                if (shorting ? heldQty.signum() > 0 : heldQty.signum() < 0) continue;
                 BigDecimal byShare = equity.multiply(MAX_SHARE).subtract(heldValue);
                 BigDecimal byCash = cashLeft.divide(BigDecimal.ONE.add(FEE_RATE), 2, RoundingMode.DOWN);
                 amount = amount.min(byShare).min(byCash);
                 if (amount.compareTo(MIN_TRADE) < 0) continue;
                 cashLeft = cashLeft.subtract(amount.multiply(BigDecimal.ONE.add(FEE_RATE)));
-                BigDecimal opened = amount.divide(px, 10, RoundingMode.DOWN);
-                qty.put(symbol, shorting ? heldQty.subtract(opened) : heldQty.add(opened));
+                qty.put(key, heldQty.add(amount.divide(px, 10, RoundingMode.DOWN)));
             }
             out.add(new Proposal(side, symbol, amount.setScale(2, RoundingMode.DOWN), reason));
         }
@@ -349,12 +345,8 @@ class CryptoEngine {
         boolean shortSide = o.side.equals("SHORT") || o.side.equals("COVER");
         boolean paysMore = o.side.equals("BUY") || o.side.equals("COVER");
         BigDecimal price = live.multiply(paysMore ? BigDecimal.ONE.add(SLIPPAGE) : BigDecimal.ONE.subtract(SLIPPAGE)).setScale(6, RoundingMode.HALF_UP);
-        CryptoPosition held = pos.stream().filter(p -> p.symbol.equals(o.symbol)).findFirst().orElse(null);
-        if (opening && held != null && held.isShort() != shortSide) {
-            reject(o, shortSide ? "[sell your coins before shorting]" : "[cover your short before buying]");
-            return;
-        }
-        if (!opening && (held == null || held.qty.signum() <= 0 || held.isShort() != shortSide)) {
+        CryptoPosition held = pos.stream().filter(p -> p.symbol.equals(o.symbol) && p.isShort() == shortSide).findFirst().orElse(null);
+        if (!opening && (held == null || held.qty.signum() <= 0)) {
             reject(o, shortSide ? "[no short to cover]" : "[nothing to sell]");
             return;
         }
@@ -417,12 +409,13 @@ class CryptoEngine {
         orders.save(o);
         accounts.save(a);
         if (opening && "AI".equals(o.source) && a.protectOn) attachProtection(a, held);
-        else if (!opening && !pos.contains(held)) cancelProtection(a.userId, o.symbol);
+        else if (!opening && !pos.contains(held)) cancelProtection(a.userId, o.symbol, shortSide);
     }
 
-    void cancelProtection(Long userId, String symbol) {
+    void cancelProtection(Long userId, String symbol, boolean shortSide) {
+        String closeSide = shortSide ? "COVER" : "SELL";
         for (CryptoOrder w : orders.findByUserIdAndStatus(userId, "WATCHING")) {
-            if (!"PROTECT".equals(w.source) || !w.symbol.equals(symbol)) continue;
+            if (!"PROTECT".equals(w.source) || !w.symbol.equals(symbol) || !closeSide.equals(w.side)) continue;
             w.status = "CANCELLED";
             orders.save(w);
         }
@@ -447,8 +440,8 @@ class CryptoEngine {
     }
 
     void attachProtection(CryptoAccount a, CryptoPosition p) {
-        cancelProtection(a.userId, p.symbol);
         boolean sh = p.isShort();
+        cancelProtection(a.userId, p.symbol, sh);
         if (a.stopLossPct != null && a.stopLossPct.signum() > 0) protect(p, a.stopLossPct, true, sh ? "ABOVE" : "BELOW");
         if (a.takeProfitPct != null && a.takeProfitPct.signum() > 0) protect(p, a.takeProfitPct, false, sh ? "BELOW" : "ABOVE");
         watching.set(-1);
@@ -473,7 +466,6 @@ class CryptoEngine {
         BigDecimal px = price(symbol);
         if (px == null) throw bad("No live price for " + symbol + " right now. Try again in a moment.");
         List<CryptoPosition> pos = new ArrayList<>(positions.findByUserId(a.userId));
-        CryptoPosition held = pos.stream().filter(p -> p.symbol.equals(symbol)).findFirst().orElse(null);
         boolean trigger = in.price() != null;
         BigDecimal ref = trigger ? in.price() : px;
         if (ref.signum() <= 0) throw bad("Enter a price above zero");
@@ -481,16 +473,14 @@ class CryptoEngine {
         BigDecimal qty;
         boolean opens = side.equals("BUY") || side.equals("SHORT");
         boolean shortSide = side.equals("SHORT") || side.equals("COVER");
-        if (opens && held != null && held.isShort() != shortSide) {
-            throw bad(shortSide ? "You hold " + symbol + ". Sell it before shorting." : "You are short " + symbol + ". Cover the short before buying.");
-        }
+        CryptoPosition held = pos.stream().filter(p -> p.symbol.equals(symbol) && p.isShort() == shortSide).findFirst().orElse(null);
         if (opens) {
             amount = in.amount();
             if (amount == null || amount.compareTo(MIN_TRADE) < 0) throw bad("The minimum amount is " + MIN_TRADE.toPlainString() + " rupees");
             if (!trigger && amount.compareTo(a.cash) > 0) throw bad("You only have " + a.cash.toPlainString() + " rupees in cash");
             qty = amount.divide(ref, 8, RoundingMode.DOWN);
         } else {
-            if (held == null || held.qty.signum() <= 0 || held.isShort() != shortSide) throw bad(shortSide ? "You have no short on " + symbol : "You don't hold any " + symbol);
+            if (held == null || held.qty.signum() <= 0) throw bad(shortSide ? "You have no short on " + symbol : "You don't hold any " + symbol);
             BigDecimal pc = in.percent();
             if (pc == null || pc.signum() <= 0 || pc.compareTo(BigDecimal.valueOf(100)) > 0) throw bad("Choose between 1 and 100 percent");
             qty = held.qty.multiply(pc).divide(BigDecimal.valueOf(100), 8, RoundingMode.DOWN);
@@ -598,7 +588,7 @@ class CryptoEngine {
             orders.save(stale);
         }
         Map<String, BigDecimal> held = new LinkedHashMap<>();
-        for (CryptoPosition p : pos) held.put(p.symbol, p.isShort() ? p.qty.negate() : p.qty);
+        for (CryptoPosition p : pos) held.put(p.isShort() ? p.symbol + ":SHORT" : p.symbol, p.qty);
         List<Proposal> props = validate(reply.get(), a.cash, equity, held, last);
         List<CryptoOrder> created = new ArrayList<>();
         for (Proposal p : props) {
@@ -679,7 +669,7 @@ class CryptoEngine {
     }
 }
 
-record LivePosition(String symbol, BigDecimal price, BigDecimal value, BigDecimal pnl) {}
+record LivePosition(String symbol, BigDecimal price, BigDecimal value, BigDecimal pnl, String side) {}
 
 record LiveView(BigDecimal equity, BigDecimal cash, BigDecimal returnPct, BigDecimal benchmarkPct, BigDecimal benchmarkPrice,
                 List<LivePosition> positions, Map<String, BigDecimal> prices, String asOf) {}
@@ -796,7 +786,7 @@ class CryptoPaperController {
             BigDecimal px = engine.price(p.symbol);
             BigDecimal value = px == null ? null : CryptoEngine.value(p, px).setScale(2, RoundingMode.HALF_UP);
             BigDecimal pnl = px == null ? null : CryptoEngine.pnl(p, px).setScale(2, RoundingMode.HALF_UP);
-            lp.add(new LivePosition(p.symbol, px, value, pnl));
+            lp.add(new LivePosition(p.symbol, px, value, pnl, p.side));
         }
         BigDecimal equity = engine.equity(a, pos);
         BigDecimal ret = equity.subtract(a.startCash).multiply(BigDecimal.valueOf(100)).divide(a.startCash, 2, RoundingMode.HALF_UP);
