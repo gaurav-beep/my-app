@@ -1,9 +1,27 @@
-import { useCallback, useEffect, useRef, useState } from 'react'
+import { useCallback, useEffect, useRef, useState, type ReactNode } from 'react'
 
 type UserInfo = { name?: string; email?: string; picture?: string }
 type ToastState = { msg: string } | null
 
-const money = (n: number) => n.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })
+type Order = {
+  id: number; symbol: string; side: string; qty: number; status: string; reason: string | null
+  decidedOn: string; fillPrice: number | null; fees: number | null; amount?: number | null
+}
+type PaperView = {
+  cash: number; startCash: number; startBenchmark: number | null; equity: number; returnPct: number; benchmarkPct: number | null
+  positions: { symbol: string; qty: number; avgCost: number; price: number | null; value: number | null; pnl: number | null }[]
+  orders: Order[]
+  history: { day: string; equity: number; benchmark: number | null }[]
+  lastSummary: string | null; lastDecisionOn: string | null; autoTrade: boolean; strategy: string | null
+}
+
+const BASE = '/crypto-paper'
+const WAKING = 'Waking up the server. This can take up to a minute the first time...'
+const PALETTE = ['#f7931a', '#627eea', '#f3ba2f', '#3b82f6', '#14b8a6', '#c2a633', '#8b5cf6', '#ef4444', '#ec4899', '#2a5ada']
+
+const inr = (n: number) => n.toLocaleString('en-IN', { style: 'currency', currency: 'INR', minimumFractionDigits: 2, maximumFractionDigits: 2 })
+const qtyText = (n: number) => n.toLocaleString('en-IN', { maximumFractionDigits: 8 })
+const pctText = (n: number) => `${n >= 0 ? '+' : ''}${n.toFixed(2)}%`
 const sleep = (ms: number) => new Promise(r => setTimeout(r, ms))
 
 declare global {
@@ -50,7 +68,16 @@ function useSlow(active: boolean, ms = 3000) {
   return slow
 }
 
-const WAKING = 'Waking up the server. This can take up to a minute the first time...'
+function Logo() {
+  return (
+    <span className="logo" aria-hidden="true">
+      <svg viewBox="0 0 24 24" width="22" height="22" fill="none" stroke="currentColor" strokeWidth="2.2" strokeLinecap="round" strokeLinejoin="round">
+        <polyline points="3 17 9 11 13 15 21 7" />
+        <polyline points="15 7 21 7 21 13" />
+      </svg>
+    </span>
+  )
+}
 
 function Login({ onLogin }: { onLogin: () => void }) {
   const [error, setError] = useState('')
@@ -102,76 +129,101 @@ function Login({ onLogin }: { onLogin: () => void }) {
 
   return (
     <main className="login">
-      <h1>AI Paper Trading</h1>
-      <p className="muted">Practise trading with virtual money while an AI suggests the trades. Sign in or sign up with Google, no password needed.</p>
-      <div ref={buttonRef} className="gbtn" />
-      {(loading || busy) && <p className="muted">{slow ? WAKING : 'Loading...'}</p>}
-      {error && <p className="error">{error}</p>}
+      <div className="login-card">
+        <div className="login-mark"><Logo /></div>
+        <h1>AI Crypto Lab</h1>
+        <p className="lead">Practise crypto trading with virtual rupees. An AI studies the market every few hours and suggests trades, and you test your own ideas risk-free.</p>
+        <ul className="points">
+          <li>Virtual money only, nothing real is ever at stake</li>
+          <li>Live CoinDCX prices, open 24 hours a day</li>
+          <li>Approve each AI trade, or let it trade for you</li>
+        </ul>
+        <div ref={buttonRef} className="gbtn" />
+        {(loading || busy) && <p className="muted small">{slow ? WAKING : 'Loading...'}</p>}
+        {error && <p className="error">{error}</p>}
+      </div>
     </main>
   )
 }
 
-const signed = (n: number) => `${n >= 0 ? '+' : '-'}${money(Math.abs(n))}`
-const gainColor = (n: number | null) => (n == null ? undefined : n >= 0 ? '#16a34a' : 'var(--danger)')
-
-type PaperView = {
-  cash: number; startCash: number; startBenchmark: number | null; equity: number; returnPct: number; benchmarkPct: number | null
-  positions: { symbol: string; qty: number; avgCost: number; price: number | null; value: number | null; pnl: number | null }[]
-  orders: { id: number; symbol: string; side: string; qty: number; status: string; reason: string | null; decidedOn: string; fillPrice: number | null; fees: number | null; amount?: number | null }[]
-  history: { day: string; equity: number; benchmark: number | null }[]
-  lastSummary: string | null; lastDecisionOn: string | null; autoTrade: boolean; strategy: string | null
+function Coin({ symbol }: { symbol: string }) {
+  const i = [...symbol].reduce((a, c) => a + c.charCodeAt(0), 0) % PALETTE.length
+  return <span className="coin" style={{ background: PALETTE[i] }}>{symbol.slice(0, 3)}</span>
 }
 
-function Chart({ view, benchmarkName }: { view: PaperView; benchmarkName: string }) {
-  const pts = view.history
-  if (pts.length < 2) return <p className="muted center">The chart appears after two trading days.</p>
-  const mine = pts.map(h => (h.equity / view.startCash) * 100)
-  const bench = pts.map(h => (view.startBenchmark && h.benchmark ? (h.benchmark / view.startBenchmark) * 100 : NaN))
+function Chart({ view }: { view: PaperView }) {
+  const pts = [{ equity: view.startCash, benchmark: view.startBenchmark }, ...view.history]
+  if (pts.length < 2) return <p className="chart-empty">Your chart appears after the first daily snapshot.</p>
+  const mine = pts.map(p => (p.equity / view.startCash) * 100)
+  const bench = pts.map(p => (view.startBenchmark && p.benchmark ? (p.benchmark / view.startBenchmark) * 100 : NaN))
   const all = [...mine, ...bench.filter(v => !Number.isNaN(v)), 100]
   const lo = Math.min(...all)
   const hi = Math.max(...all)
   const w = 320
-  const h = 100
+  const h = 96
+  const pad = 6
   const x = (i: number) => (i / (pts.length - 1)) * w
-  const y = (v: number) => h - ((v - lo) / (hi - lo || 1)) * h
+  const y = (v: number) => pad + (h - pad * 2) - ((v - lo) / (hi - lo || 1)) * (h - pad * 2)
   const line = (vals: number[]) => vals.map((v, i) => (Number.isNaN(v) ? '' : `${x(i).toFixed(1)},${y(v).toFixed(1)}`)).filter(Boolean).join(' ')
+  const area = `${line(mine)} ${w},${h} 0,${h}`
   return (
-    <div>
-      <svg viewBox={`0 0 ${w} ${h}`} width="100%" role="img" aria-label={`AI portfolio versus ${benchmarkName}`}>
-        <polyline points={line(mine)} fill="none" stroke="#2563eb" strokeWidth="2" />
-        <polyline points={line(bench)} fill="none" stroke="#9ca3af" strokeWidth="2" strokeDasharray="4 3" />
+    <div className="chart">
+      <svg viewBox={`0 0 ${w} ${h}`} width="100%" height="96" preserveAspectRatio="none" role="img" aria-label="AI portfolio versus Bitcoin">
+        <defs>
+          <linearGradient id="fill" x1="0" y1="0" x2="0" y2="1">
+            <stop offset="0%" stopColor="#fff" stopOpacity="0.35" />
+            <stop offset="100%" stopColor="#fff" stopOpacity="0" />
+          </linearGradient>
+        </defs>
+        <line x1="0" x2={w} y1={y(100)} y2={y(100)} stroke="#fff" strokeOpacity="0.25" strokeDasharray="3 4" />
+        <polygon points={area} fill="url(#fill)" />
+        <polyline points={line(bench)} fill="none" stroke="#fff" strokeOpacity="0.55" strokeWidth="1.5" strokeDasharray="4 3" vectorEffect="non-scaling-stroke" />
+        <polyline points={line(mine)} fill="none" stroke="#fff" strokeWidth="2.5" strokeLinejoin="round" vectorEffect="non-scaling-stroke" />
       </svg>
-      <small className="muted">Blue: AI portfolio. Grey dashed: {benchmarkName}. Both start at 100.</small>
+      <div className="legend"><span><i className="solid" /> AI portfolio</span><span><i className="dashed" /> Bitcoin</span></div>
     </div>
   )
 }
 
-function PaperTrading({ showToast, market }: { showToast: (t: { msg: string }) => void; market: 'stock' | 'crypto' }) {
-  const crypto = market === 'crypto'
-  const base = crypto ? '/crypto-paper' : '/paper'
-  const benchmarkName = crypto ? 'Bitcoin' : 'Nifty'
+function Section({ title, hint, children, defaultOpen = false }: { title: string; hint?: string; children: ReactNode; defaultOpen?: boolean }) {
+  return (
+    <details className="card fold" open={defaultOpen}>
+      <summary><span>{title}</span>{hint && <small>{hint}</small>}</summary>
+      <div className="fold-body">{children}</div>
+    </details>
+  )
+}
+
+function Dashboard({ showToast }: { showToast: (t: { msg: string }) => void }) {
   const [status, setStatus] = useState<{ available: boolean; started: boolean } | null>(null)
   const [view, setView] = useState<PaperView | null>(null)
   const [busy, setBusy] = useState(false)
   const [amount, setAmount] = useState('10000')
   const [extra, setExtra] = useState('')
   const [strategy, setStrategy] = useState('')
+  const slow = useSlow(status === null)
 
   const load = useCallback(async () => {
-    const st = await (await api(`${base}/status`)).json()
+    const st = await (await api(`${BASE}/status`)).json()
     setStatus(st)
     if (st.started) {
-      const res = await api(base)
+      const res = await api(BASE)
       if (res.ok) {
         const v: PaperView = await res.json()
         setView(v)
-        setStrategy(v.strategy ?? '')
+        setStrategy(s => (s === '' ? v.strategy ?? '' : s))
       }
     } else {
       setView(null)
     }
-  }, [base])
+  }, [])
   useEffect(() => { load().catch(() => setStatus({ available: false, started: false })) }, [load])
+  useEffect(() => {
+    const refresh = () => { if (document.visibilityState === 'visible') load().catch(() => undefined) }
+    const t = setInterval(refresh, 60000)
+    document.addEventListener('visibilitychange', refresh)
+    return () => { clearInterval(t); document.removeEventListener('visibilitychange', refresh) }
+  }, [load])
 
   const act = async (path: string, ok?: string, body?: object) => {
     setBusy(true)
@@ -189,120 +241,173 @@ function PaperTrading({ showToast, market }: { showToast: (t: { msg: string }) =
     }
   }
   const reset = async () => {
-    if (!window.confirm('Reset paper trading? This deletes the virtual account and its history.')) return
-    await act(`${base}/reset`, 'Paper account reset')
+    if (!window.confirm('Reset your paper account? This deletes the virtual money, trades and history.')) return
+    setStrategy('')
+    await act(`${BASE}/reset`, 'Paper account reset')
   }
 
-  if (!status) return <p className="muted center">Loading...</p>
-  if (!status.available) return <section className="card"><p className="muted">AI paper trading needs a free Gemini API key set on the server. It is not set up yet.</p></section>
+  if (!status) {
+    return (
+      <div className="stack">
+        <div className="skeleton hero-skeleton" />
+        <div className="skeleton row-skeleton" />
+        <div className="skeleton row-skeleton" />
+        {slow && <p className="muted small center">{WAKING}</p>}
+      </div>
+    )
+  }
+  if (!status.available) {
+    return <section className="card"><p className="muted">The AI needs a free Gemini API key on the server and is not set up yet.</p></section>
+  }
 
   if (!status.started || !view) {
     return (
-      <section className="card form">
-        <strong>AI paper trading</strong>
-        {crypto ? (
-          <>
-            <p className="muted">You choose a virtual amount in rupees. Crypto trades 24 hours a day, so every 4 hours an AI looks at prices of 10 popular coins and suggests simulated trades. Orders fill straight away at the current CoinDCX price with a small cost and slippage. No real money is ever used.</p>
-            <p className="muted">This is a simulation for learning, not investment advice. Crypto is very volatile and AI results are unreliable. The point is to see honestly how it does against just holding Bitcoin. India&apos;s 1% TDS and crypto tax are not modelled. Prices come from CoinDCX and the AI is Google Gemini, whose free tier may use prompts to improve Google products.</p>
-          </>
-        ) : (
-          <>
-            <p className="muted">You choose a virtual amount to start with. Once a day after the market closes, an AI looks at recent prices of 14 large Indian stocks and a Nifty ETF and places simulated orders, which fill at the next day&apos;s opening price with realistic costs. No real money is ever used.</p>
-            <p className="muted">This is a simulation for learning, not investment advice. AI results are unreliable, and the point is to see honestly how it does against just holding the Nifty. Market prices come from Yahoo and the AI is Google Gemini, whose free tier may use prompts to improve Google products.</p>
-          </>
-        )}
-        <input inputMode="decimal" value={amount} onChange={e => setAmount(e.target.value.replace(/[^0-9.]/g, ''))} placeholder="Virtual amount in rupees" aria-label="Starting amount" />
-        <small className="muted">Any amount from 1,000 to 1,00,00,000 rupees. You can add more later.</small>
-        <button className="primary" disabled={busy || !amount} onClick={() => act(`${base}/start`, 'Paper account created', { amount: Number(amount) })}>{busy ? 'Starting...' : 'Start paper account'}</button>
+      <section className="card start">
+        <h2>Start your paper account</h2>
+        <p className="muted">Pick any amount of virtual rupees. Every 4 hours an AI looks at 10 popular coins and suggests trades. Orders fill straight away at the live CoinDCX price, with a small cost and slippage added so it feels real.</p>
+        <label className="field">
+          <span>Starting amount</span>
+          <div className="input-wrap">
+            <b>₹</b>
+            <input inputMode="decimal" value={amount} onChange={e => setAmount(e.target.value.replace(/[^0-9.]/g, ''))} aria-label="Starting amount" />
+          </div>
+          <small className="muted">From 1,000 to 1,00,00,000. You can add more any time.</small>
+        </label>
+        <div className="chips">
+          {[10000, 50000, 100000].map(v => <button key={v} type="button" className="chip" onClick={() => setAmount(String(v))}>{inr(v).replace('.00', '')}</button>)}
+        </div>
+        <button className="btn primary big" disabled={busy || !amount} onClick={() => act(`${BASE}/start`, 'Paper account created', { amount: Number(amount) })}>
+          {busy ? 'Starting...' : 'Start paper trading'}
+        </button>
+        <p className="muted small">A learning simulation, not investment advice. Crypto is very volatile and AI results are unreliable. India&apos;s 1% TDS and crypto tax are not modelled.</p>
       </section>
     )
   }
 
+  const suggestions = view.orders.filter(o => o.status === 'SUGGESTED')
+  const history = view.orders.filter(o => o.status !== 'SUGGESTED')
   const diff = view.benchmarkPct == null ? null : view.returnPct - view.benchmarkPct
+  const holdingsValue = view.equity - view.cash
+  const up = view.returnPct >= 0
+
   return (
-    <>
-      <section className="card summary">
-        <div className="muted center">Paper portfolio value</div>
-        <div className="grand">{money(view.equity)}</div>
-        <div className="center">
-          <strong style={{ color: gainColor(view.returnPct) }}>{view.returnPct >= 0 ? '+' : ''}{view.returnPct.toFixed(2)}%</strong>
-          {view.benchmarkPct != null && <span> &middot; {benchmarkName} {view.benchmarkPct >= 0 ? '+' : ''}{view.benchmarkPct.toFixed(2)}%</span>}
-          {diff != null && <span style={{ color: gainColor(diff) }}> &middot; {diff >= 0 ? 'ahead by' : 'behind by'} {Math.abs(diff).toFixed(2)} pts</span>}
+    <div className="stack">
+      <section className="hero">
+        <div className="hero-top">
+          <span>Portfolio value</span>
+          <span className={`pill ${up ? 'up' : 'down'}`}>{up ? '▲' : '▼'} {pctText(view.returnPct)}</span>
         </div>
-        <div className="center muted">Cash {money(view.cash)} &middot; started with {money(view.startCash)}</div>
-        <Chart view={view} benchmarkName={benchmarkName} />
+        <div className="hero-value">{inr(view.equity)}</div>
+        <div className="hero-sub">
+          {view.benchmarkPct != null && <span>Bitcoin {pctText(view.benchmarkPct)}</span>}
+          {diff != null && <span className="chip-soft">{diff >= 0 ? 'Beating Bitcoin by' : 'Behind Bitcoin by'} {Math.abs(diff).toFixed(2)} pts</span>}
+        </div>
+        <Chart view={view} />
       </section>
 
-      <section className="card setup">
-        <strong>Latest AI view</strong>
-        <p className="muted">{view.lastSummary || (crypto ? 'No decision yet. The AI decides every 4 hours, or you can run it now.' : 'No decision yet. The AI decides once a day after the market closes (about 4 PM IST), or you can run it now.')}</p>
-        <div className="row">
-          <button type="button" className="primary" disabled={busy} onClick={() => act(`${base}/run`)}>{busy ? 'Asking the AI...' : 'Run AI now'}</button>
-          <button type="button" className="danger" disabled={busy} onClick={reset}>Reset</button>
+      <div className="tiles">
+        <div className="tile"><small>Cash</small><b>{inr(view.cash)}</b></div>
+        <div className="tile"><small>In coins</small><b>{inr(holdingsValue)}</b></div>
+        <div className="tile"><small>Started with</small><b>{inr(view.startCash)}</b></div>
+      </div>
+
+      <section className="card ai">
+        <div className="ai-head">
+          <div>
+            <h2>AI assistant</h2>
+            <small className="muted">Checks the market every 4 hours</small>
+          </div>
+          <label className="switch" title="Let the AI trade for you">
+            <input type="checkbox" checked={view.autoTrade} disabled={busy} aria-label="Auto-trade"
+              onChange={e => act(`${BASE}/auto`, e.target.checked ? 'Auto-trade on' : 'Auto-trade off', { enabled: e.target.checked })} />
+            <span className="track"><span className="knob" /></span>
+            <span className="switch-label">Auto-trade</span>
+          </label>
         </div>
-        <label className="row" style={{ alignItems: 'center' }}>
-          <input type="checkbox" checked={view.autoTrade} disabled={busy} onChange={e => act(`${base}/auto`, e.target.checked ? 'Auto-trading on' : 'Auto-trading off', { enabled: e.target.checked })} style={{ minHeight: 'auto', width: 20, height: 20 }} />
-          <span>Auto-trade: AI orders go through without asking me</span>
+        <div className="bubble">{view.lastSummary || 'No decision yet. Tap the button to ask the AI for its first view.'}</div>
+        <p className="muted small">{view.autoTrade ? 'The AI trades for you at the live price.' : 'Auto-trade is off. The AI only suggests, and you approve each trade.'}</p>
+        <button className="btn primary" disabled={busy} onClick={() => act(`${BASE}/run`)}>{busy ? 'Asking the AI...' : 'Ask the AI now'}</button>
+      </section>
+
+      {suggestions.length > 0 && (
+        <section className="stack">
+          <h3 className="section-title">Waiting for your decision <span className="count">{suggestions.length}</span></h3>
+          {suggestions.map(o => (
+            <div key={o.id} className="card suggestion">
+              <div className="row between">
+                <div className="row gap"><Coin symbol={o.symbol} /><div><b>{o.side === 'BUY' ? 'Buy' : 'Sell'} {o.symbol}</b><small className="muted block">{qtyText(o.qty)} coins{o.amount != null ? `, about ${inr(o.amount)}` : ''}</small></div></div>
+                <span className={`badge ${o.side === 'BUY' ? 'buy' : 'sell'}`}>{o.side}</span>
+              </div>
+              {o.reason && <p className="reason">{o.reason}</p>}
+              <div className="row gap">
+                <button className="btn primary" disabled={busy} onClick={() => act(`${BASE}/orders/${o.id}/approve`, 'Approved and filled at the live price')}>Approve</button>
+                <button className="btn" disabled={busy} onClick={() => act(`${BASE}/orders/${o.id}/decline`, 'Declined')}>Decline</button>
+              </div>
+            </div>
+          ))}
+        </section>
+      )}
+
+      <section className="stack">
+        <h3 className="section-title">Your coins</h3>
+        {view.positions.length === 0 && <div className="card empty"><b>No coins yet</b><small className="muted">Approve a suggestion, or turn on auto-trade, and your holdings show up here.</small></div>}
+        {view.positions.map(p => (
+          <div key={p.symbol} className="card holding">
+            <div className="row gap"><Coin symbol={p.symbol} /><div><b>{p.symbol}</b><small className="muted block">{qtyText(p.qty)} · avg {inr(p.avgCost)}</small></div></div>
+            <div className="right">
+              <b>{p.value != null ? inr(p.value) : 'n/a'}</b>
+              {p.pnl != null && <span className={`pnl ${p.pnl >= 0 ? 'up' : 'down'}`}>{p.pnl >= 0 ? '+' : '-'}{inr(Math.abs(p.pnl))}</span>}
+            </div>
+          </div>
+        ))}
+      </section>
+
+      <Section title="Recent activity" hint={history.length ? `${history.length} trades` : undefined}>
+        {history.length === 0 && <p className="muted small">Nothing yet.</p>}
+        {history.map(o => (
+          <div key={o.id} className="activity">
+            <div className="row between">
+              <div className="row gap"><Coin symbol={o.symbol} /><div><b>{o.side === 'BUY' ? 'Bought' : 'Sold'} {o.symbol}</b><small className="muted block">{o.decidedOn}{o.fillPrice != null ? ` · at ${inr(o.fillPrice)}` : ''}</small></div></div>
+              <span className={`badge ${o.status.toLowerCase()}`}>{o.status.toLowerCase()}</span>
+            </div>
+            {o.reason && <small className="muted">{o.reason}</small>}
+          </div>
+        ))}
+      </Section>
+
+      <Section title="My strategy" hint="Tell the AI how to trade">
+        <textarea value={strategy} maxLength={500} rows={4} onChange={e => setStrategy(e.target.value)} aria-label="My strategy"
+          placeholder="For example: only trade BTC and ETH, buy after a 5% dip, sell when up 8%, never hold more than 2 coins." />
+        <button className="btn" disabled={busy} onClick={() => act(`${BASE}/strategy`, 'Strategy saved', { text: strategy })}>Save strategy</button>
+        <small className="muted">The AI reads this at its next check and tries to follow it. It is not a strict rules engine, and the safety limits always apply.</small>
+      </Section>
+
+      <Section title="Account" hint="Add money or reset">
+        <label className="field">
+          <span>Add virtual cash</span>
+          <div className="input-wrap">
+            <b>₹</b>
+            <input inputMode="decimal" value={extra} onChange={e => setExtra(e.target.value.replace(/[^0-9.]/g, ''))} placeholder="5000" aria-label="Add virtual cash" />
+            <button className="btn small-btn" disabled={busy || !extra} onClick={async () => { await act(`${BASE}/deposit`, 'Cash added', { amount: Number(extra) }); setExtra('') }}>Add</button>
+          </div>
         </label>
-        <small className="muted">{view.autoTrade ? (crypto ? 'Orders the AI decides fill automatically at the current price.' : 'Orders the AI decides fill automatically at the next trading day\'s open.') : 'With auto-trade off, the AI only suggests trades. You approve or decline each one.'}</small>
-        <div className="row">
-          <input inputMode="decimal" value={extra} onChange={e => setExtra(e.target.value.replace(/[^0-9.]/g, ''))} placeholder="Add virtual cash" aria-label="Add virtual cash" style={{ flex: 1 }} />
-          <button type="button" disabled={busy || !extra} onClick={async () => { await act(`${base}/deposit`, 'Cash added', { amount: Number(extra) }); setExtra('') }}>Add</button>
-        </div>
-        <small className="muted">Added cash counts as capital you put in, so return percentages stay fair, but comparing with {benchmarkName} becomes approximate.{crypto ? '' : ' The server must be awake at the next open for orders to fill, so this works best with the keep-awake monitor.'}</small>
-      </section>
+        <small className="muted">Added cash counts as money you put in, so your return stays fair, but the Bitcoin comparison becomes approximate.</small>
+        <button className="btn danger" disabled={busy} onClick={reset}>Reset paper account</button>
+      </Section>
 
-      <section className="card setup">
-        <strong>My strategy (optional)</strong>
-        <textarea value={strategy} maxLength={500} rows={3} onChange={e => setStrategy(e.target.value)} aria-label="My strategy"
-          placeholder={crypto ? 'For example: only trade BTC and ETH, buy after a 5% dip, sell when up 8%, never hold more than 2 coins.' : 'For example: prefer banks and IT, buy on dips, sell when up 10%, keep at least 30% in cash.'}
-          style={{ font: 'inherit', padding: '0.5rem 0.75rem', border: '1px solid var(--border)', borderRadius: 10, background: 'var(--card)', color: 'inherit', resize: 'vertical' }} />
-        <button type="button" disabled={busy} onClick={() => act(`${base}/strategy`, 'Strategy saved', { text: strategy })}>Save strategy</button>
-        <small className="muted">The AI reads this in its next decision and tries to follow it, but the safety limits always apply. It is not a rules engine, so it may interpret it loosely.</small>
-      </section>
-
-      {view.orders.some(o => o.status === 'SUGGESTED') && <strong>AI suggestions for you</strong>}
-      {view.orders.filter(o => o.status === 'SUGGESTED').map(o => (
-        <div key={o.id} className="card form">
-          <div className="kv">
-            <strong>{o.side === 'BUY' ? 'Buy' : 'Sell'} {o.qty} {o.symbol.replace('.NS', '')}</strong>
-            <small className="muted">{o.amount != null ? `about ${money(o.amount)} INR` : o.decidedOn}</small>
-          </div>
-          {o.reason && <small className="muted">{o.reason}</small>}
-          <div className="row">
-            <button type="button" className="primary" disabled={busy} onClick={() => act(`${base}/orders/${o.id}/approve`, crypto ? 'Approved and filled at the current price' : 'Approved. It fills at the next open.')}>Approve</button>
-            <button type="button" disabled={busy} onClick={() => act(`${base}/orders/${o.id}/decline`, 'Declined')}>Decline</button>
-          </div>
-        </div>
-      ))}
-
-      {view.positions.map(p => (
-        <div key={p.symbol} className="card item">
-          <span className="desc"><span>{p.symbol.replace('.NS', '')}</span><small>{p.qty} shares &middot; avg {money(p.avgCost)}</small></span>
-          <span className="right">
-            <strong>{p.value != null ? money(p.value) : 'n/a'}</strong>
-            {p.pnl != null && <small style={{ color: gainColor(p.pnl) }}>{signed(p.pnl)}</small>}
-          </span>
-        </div>
-      ))}
-      {view.positions.length === 0 && <p className="muted center">No open positions.</p>}
-
-      {view.orders.length > 0 && <strong>Recent orders</strong>}
-      {view.orders.filter(o => o.status !== 'SUGGESTED').map(o => (
-        <div key={o.id} className="card">
-          <div className="kv">
-            <strong>{o.side} {o.qty} {o.symbol.replace('.NS', '')}</strong>
-            <small className="muted">{o.status.toLowerCase()}{o.fillPrice != null ? ` at ${money(o.fillPrice)}` : ''} &middot; {o.decidedOn}</small>
-          </div>
-          {o.reason && <small className="muted">{o.reason}</small>}
-        </div>
-      ))}
-    </>
+      <Section title="How it works">
+        <ul className="points dark">
+          <li>The AI sees prices, 1-hour, 24-hour and 7-day moves for 10 coins.</li>
+          <li>Safety limits: at most 4 orders at a time, ₹200 minimum, and no coin above 35% of your portfolio.</li>
+          <li>Costs: about 0.2% per trade plus 0.1% slippage. Prices come from CoinDCX.</li>
+          <li>The AI is Google Gemini. Its free tier may use prompts to improve Google products, and they contain only prices and your virtual holdings.</li>
+        </ul>
+      </Section>
+    </div>
   )
 }
 
-function Tracker({ onLogout }: { onLogout: () => void }) {
-  const [market, setMarket] = useState<'stock' | 'crypto'>('stock')
+function Shell({ onLogout }: { onLogout: () => void }) {
   const [toast, setToast] = useState<ToastState>(null)
   const toastTimer = useRef<ReturnType<typeof setTimeout>>(undefined)
   const user: UserInfo = JSON.parse(localStorage.getItem('user') || '{}')
@@ -310,32 +415,24 @@ function Tracker({ onLogout }: { onLogout: () => void }) {
   const showToast = useCallback((t: NonNullable<ToastState>) => {
     clearTimeout(toastTimer.current)
     setToast(t)
-    toastTimer.current = setTimeout(() => setToast(null), 6000)
+    toastTimer.current = setTimeout(() => setToast(null), 5000)
   }, [])
 
   return (
-    <main className="app">
-      <header className="top">
-        <div className="who">
+    <>
+      <header className="topbar">
+        <div className="brand"><Logo /><span>AI Crypto Lab</span></div>
+        <div className="user">
           {user.picture && <img src={user.picture} alt="" referrerPolicy="no-referrer" />}
-          <span>{user.name || user.email}</span>
+          <span className="user-name">{user.name || user.email}</span>
+          <button className="link" onClick={() => { clearSession(); onLogout() }}>Sign out</button>
         </div>
-        <button className="link" onClick={() => { clearSession(); onLogout() }}>Sign out</button>
       </header>
-
-      <nav className="tabs">
-        <button className={market === 'stock' ? 'on' : ''} onClick={() => setMarket('stock')}>Stocks</button>
-        <button className={market === 'crypto' ? 'on' : ''} onClick={() => setMarket('crypto')}>Crypto 24/7</button>
-      </nav>
-
-      <PaperTrading key={market} market={market} showToast={showToast} />
-
-      {toast && (
-        <div className="toast" role="status">
-          <span>{toast.msg}</span>
-        </div>
-      )}
-    </main>
+      <main className="app">
+        <Dashboard showToast={showToast} />
+      </main>
+      {toast && <div className="toast" role="status">{toast.msg}</div>}
+    </>
   )
 }
 
@@ -349,5 +446,5 @@ export default function App() {
       .catch(() => { /* keep the current token if the server is waking up */ })
   }, [])
   const onLogin = useCallback(() => setAuthed(true), [])
-  return authed ? <Tracker onLogout={() => setAuthed(false)} /> : <Login onLogin={onLogin} />
+  return authed ? <Shell onLogout={() => setAuthed(false)} /> : <Login onLogin={onLogin} />
 }

@@ -172,7 +172,7 @@ class CryptoEngine {
     }
 
     CryptoAccount start(Long userId, BigDecimal amount) {
-        BigDecimal start = PaperEngine.checkAmount(amount);
+        BigDecimal start = PaperLimits.checkAmount(amount);
         return accounts.findById(userId).orElseGet(() -> {
             CryptoAccount a = new CryptoAccount();
             a.userId = userId;
@@ -184,7 +184,7 @@ class CryptoEngine {
     }
 
     void deposit(CryptoAccount a, BigDecimal amount) {
-        BigDecimal add = PaperEngine.checkAmount(amount);
+        BigDecimal add = PaperLimits.checkAmount(amount);
         a.cash = a.cash.add(add);
         a.startCash = a.startCash.add(add);
         accounts.save(a);
@@ -474,23 +474,23 @@ class CryptoPaperController {
     }
 
     @PostMapping("/start") @ResponseStatus(HttpStatus.NO_CONTENT)
-    void start(@AuthenticationPrincipal Jwt jwt, @RequestBody PaperController.AmountIn in) {
+    void start(@AuthenticationPrincipal Jwt jwt, @RequestBody AmountIn in) {
         if (!llm.enabled()) throw new ResponseStatusException(HttpStatus.SERVICE_UNAVAILABLE, "The AI is not set up on the server yet");
         engine.start(uid(jwt), in.amount());
     }
 
     @PostMapping("/deposit") @ResponseStatus(HttpStatus.NO_CONTENT)
-    void deposit(@AuthenticationPrincipal Jwt jwt, @RequestBody PaperController.AmountIn in) { engine.deposit(account(jwt), in.amount()); }
+    void deposit(@AuthenticationPrincipal Jwt jwt, @RequestBody AmountIn in) { engine.deposit(account(jwt), in.amount()); }
 
     @PostMapping("/auto") @ResponseStatus(HttpStatus.NO_CONTENT)
-    void auto(@AuthenticationPrincipal Jwt jwt, @RequestBody PaperController.AutoIn in) {
+    void auto(@AuthenticationPrincipal Jwt jwt, @RequestBody AutoIn in) {
         CryptoAccount a = account(jwt);
         a.autoTrade = in.enabled();
         accounts.save(a);
     }
 
     @PostMapping("/strategy") @ResponseStatus(HttpStatus.NO_CONTENT)
-    void strategy(@AuthenticationPrincipal Jwt jwt, @RequestBody PaperController.StrategyIn in) {
+    void strategy(@AuthenticationPrincipal Jwt jwt, @RequestBody StrategyIn in) {
         CryptoAccount a = account(jwt);
         a.strategy = CryptoEngine.cleanStrategy(in.text());
         accounts.save(a);
