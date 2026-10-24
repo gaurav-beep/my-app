@@ -258,3 +258,5 @@ select {
 .legend-list { display: flex; flex-wrap: wrap; gap: 0.4rem 1rem; font-size: 0.88rem; }
 .legend-list b { margin-left: 0.15rem; }
 .dot { display: inline-block; width: 10px; height: 10px; border-radius: 50%; margin-right: 0.3rem; }
+
+.short-tag{margin-left:6px;font-size:10px;vertical-align:middle}

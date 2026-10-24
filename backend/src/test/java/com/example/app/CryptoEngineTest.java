@@ -42,6 +42,40 @@ class CryptoEngineTest {
     }
 
     @Test
+    void shortsAreCappedAndConflictsDropped() throws Exception {
+        var out = CryptoEngine.validate(json("""
+            {"orders":[
+              {"side":"SHORT","symbol":"BTC","amount_inr":999999,"reason":"fall"},
+              {"side":"SHORT","symbol":"DOGE","amount_inr":500,"reason":"holds it"},
+              {"side":"COVER","symbol":"ETH","amount_inr":500,"reason":"no short"}]}"""),
+            new BigDecimal("10000"), new BigDecimal("10000"), Map.of("DOGE", new BigDecimal("125")), LAST);
+        assertEquals(1, out.size());
+        assertEquals("SHORT", out.get(0).side());
+        assertTrue(out.get(0).amount().compareTo(new BigDecimal("3500")) <= 0);
+    }
+
+    @Test
+    void coveringAllMostOfAShortCoversItAll() throws Exception {
+        var out = CryptoEngine.validate(json("""
+            {"orders":[{"side":"COVER","symbol":"DOGE","amount_inr":990,"reason":"exit"}]}"""),
+            new BigDecimal("1000"), new BigDecimal("2000"), Map.of("DOGE", new BigDecimal("-125")), LAST);
+        assertEquals(1, out.size());
+        assertEquals("COVER", out.get(0).side());
+    }
+
+    @Test
+    void shortValueRisesWhenPriceFalls() {
+        var p = new CryptoPosition();
+        p.side = "SHORT";
+        p.qty = new BigDecimal("2");
+        p.avgCost = new BigDecimal("100");
+        p.margin = new BigDecimal("200");
+        assertEquals(0, new BigDecimal("40").compareTo(CryptoEngine.pnl(p, new BigDecimal("80"))));
+        assertEquals(0, new BigDecimal("240").compareTo(CryptoEngine.value(p, new BigDecimal("80"))));
+        assertEquals(0, BigDecimal.ZERO.compareTo(CryptoEngine.value(p, new BigDecimal("500"))));
+    }
+
+    @Test
     void sellingMostOfAHoldingSellsItAll() throws Exception {
         var out = CryptoEngine.validate(json("""
             {"orders":[{"side":"SELL","symbol":"DOGE","amount_inr":990,"reason":"exit"}]}"""),

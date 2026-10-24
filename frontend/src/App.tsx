@@ -17,7 +17,7 @@ type Analysis = {
 }
 type PaperView = {
   cash: number; startCash: number; startBenchmark: number | null; equity: number; returnPct: number; benchmarkPct: number | null
-  positions: { symbol: string; qty: number; avgCost: number; price: number | null; value: number | null; pnl: number | null }[]
+  positions: { symbol: string; qty: number; avgCost: number; price: number | null; value: number | null; pnl: number | null; side: string }[]
   orders: Order[]
   history: { day: string; equity: number; benchmark: number | null }[]
   lastSummary: string | null; lastDecisionOn: string | null; autoTrade: boolean; strategy: string | null
@@ -243,7 +243,7 @@ function Dashboard({ showToast }: { showToast: (t: { msg: string }) => void }) {
   const [strategy, setStrategy] = useState('')
   const [analysis, setAnalysis] = useState<Analysis | null>(null)
   const [tCoin, setTCoin] = useState('BTC')
-  const [tSide, setTSide] = useState<'BUY' | 'SELL'>('BUY')
+  const [tSide, setTSide] = useState<'BUY' | 'SELL' | 'SHORT' | 'COVER'>('BUY')
   const [tMode, setTMode] = useState<'now' | 'price'>('now')
   const [tAmount, setTAmount] = useState('')
   const [tPercent, setTPercent] = useState(100)
@@ -374,10 +374,14 @@ function Dashboard({ showToast }: { showToast: (t: { msg: string }) => void }) {
   const history = view.orders.filter(o => o.status !== 'SUGGESTED' && o.status !== 'WATCHING')
   const prices = live?.prices ?? {}
   const tPriceNow = prices[tCoin] ?? null
-  const tHeld = view.positions.find(p => p.symbol === tCoin)
+  const tHeld = view.positions.find(p => p.symbol === tCoin && (p.side === 'SHORT') === (tSide === 'COVER'))
+  const tOpens = tSide === 'BUY' || tSide === 'SHORT'
+  const sideWord = (s: string) => ({ BUY: 'Buy', SELL: 'Sell', SHORT: 'Short', COVER: 'Cover' } as Record<string, string>)[s] ?? s
+  const sidePast = (s: string) => ({ BUY: 'Bought', SELL: 'Sold', SHORT: 'Shorted', COVER: 'Covered' } as Record<string, string>)[s] ?? s
+  const sideClass = (s: string) => (s === 'BUY' || s === 'COVER' ? 'buy' : 'sell')
   const submitTrade = async () => {
     const body: Record<string, unknown> = { side: tSide, symbol: tCoin }
-    if (tSide === 'BUY') body.amount = Number(tAmount)
+    if (tOpens) body.amount = Number(tAmount)
     else body.percent = tPercent
     if (tMode === 'price') body.price = Number(tPrice)
     await act(`${BASE}/${tMode === 'price' ? 'trigger' : 'trade'}`, undefined, body)
@@ -495,8 +499,8 @@ function Dashboard({ showToast }: { showToast: (t: { msg: string }) => void }) {
           {suggestions.map(o => (
             <div key={o.id} className="card suggestion">
               <div className="row between">
-                <div className="row gap"><Coin symbol={o.symbol} /><div><b>{o.side === 'BUY' ? 'Buy' : 'Sell'} {o.symbol}</b><small className="muted block">{qtyText(o.qty)} coins{o.amount != null ? `, about ${inr(o.amount)}` : ''}</small></div></div>
-                <span className={`badge ${o.side === 'BUY' ? 'buy' : 'sell'}`}>{o.side}</span>
+                <div className="row gap"><Coin symbol={o.symbol} /><div><b>{sideWord(o.side)} {o.symbol}</b><small className="muted block">{qtyText(o.qty)} coins{o.amount != null ? `, about ${inr(o.amount)}` : ''}</small></div></div>
+                <span className={`badge ${sideClass(o.side)}`}>{o.side}</span>
               </div>
               {o.reason && <p className="reason">{o.reason}</p>}
               <div className="row gap">
@@ -512,6 +516,8 @@ function Dashboard({ showToast }: { showToast: (t: { msg: string }) => void }) {
         <div className="chips">
           <button type="button" className={`chip ${tSide === 'BUY' ? 'on' : ''}`} onClick={() => setTSide('BUY')}>Buy (entry)</button>
           <button type="button" className={`chip ${tSide === 'SELL' ? 'on' : ''}`} onClick={() => setTSide('SELL')}>Sell (exit)</button>
+          <button type="button" className={`chip ${tSide === 'SHORT' ? 'on' : ''}`} onClick={() => setTSide('SHORT')}>Short (bet on fall)</button>
+          <button type="button" className={`chip ${tSide === 'COVER' ? 'on' : ''}`} onClick={() => setTSide('COVER')}>Cover (close short)</button>
           <span className="spacer" />
           <button type="button" className={`chip ${tMode === 'now' ? 'on' : ''}`} onClick={() => setTMode('now')}>Now</button>
           <button type="button" className={`chip ${tMode === 'price' ? 'on' : ''}`} onClick={() => setTMode('price')}>At my price</button>
@@ -522,9 +528,10 @@ function Dashboard({ showToast }: { showToast: (t: { msg: string }) => void }) {
             {COINS.map(c => <option key={c} value={c}>{c}{prices[c] != null ? `  ·  ${inr(prices[c])}` : ''}</option>)}
           </select>
         </label>
-        {tSide === 'BUY' ? (
+        {tSide === 'SHORT' && <small className="muted">A short earns when the price falls and loses when it rises. Your cash is set aside as backing (no leverage) and the short closes automatically if it loses 90% of it.</small>}
+        {tOpens ? (
           <label className="field">
-            <span>Amount to spend</span>
+            <span>{tSide === 'SHORT' ? 'Amount to short' : 'Amount to spend'}</span>
             <div className="input-wrap">
               <b>₹</b>
               <input inputMode="decimal" value={tAmount} onChange={e => setTAmount(e.target.value.replace(/[^0-9.]/g, ''))} placeholder="1000" aria-label="Amount to spend" />
@@ -536,7 +543,7 @@ function Dashboard({ showToast }: { showToast: (t: { msg: string }) => void }) {
           </label>
         ) : (
           <div className="field">
-            <span>How much of your {tCoin} to sell {tHeld ? `(you hold ${qtyText(tHeld.qty)})` : '(you hold none)'}</span>
+            <span>How much of your {tSide === 'COVER' ? `${tCoin} short to cover` : `${tCoin} to sell`} {tHeld ? `(you ${tSide === 'COVER' ? 'are short' : 'hold'} ${qtyText(tHeld.qty)})` : tSide === 'COVER' ? '(no short open)' : '(you hold none)'}</span>
             <div className="chips">
               {[25, 50, 75, 100].map(v => <button key={v} type="button" className={`chip ${tPercent === v ? 'on' : ''}`} onClick={() => setTPercent(v)}>{v}%</button>)}
             </div>
@@ -551,13 +558,13 @@ function Dashboard({ showToast }: { showToast: (t: { msg: string }) => void }) {
             </div>
             <small className="muted">
               {tPrice && tPriceNow != null
-                ? `${tSide === 'BUY' ? 'Buys' : 'Sells'} when ${tCoin} ${Number(tPrice) > tPriceNow ? 'rises to' : 'falls to'} ${inr(Number(tPrice))}${tSide === 'SELL' ? (Number(tPrice) > tPriceNow ? ' (take profit)' : ' (stop loss)') : (Number(tPrice) < tPriceNow ? ' (buy the dip)' : ' (breakout entry)')}.`
+                ? `${sideWord(tSide)}s when ${tCoin} ${Number(tPrice) > tPriceNow ? 'rises to' : 'falls to'} ${inr(Number(tPrice))}${tSide === 'SELL' ? (Number(tPrice) > tPriceNow ? ' (take profit)' : ' (stop loss)') : tSide === 'COVER' ? (Number(tPrice) < tPriceNow ? ' (take profit on the short)' : ' (stop loss on the short)') : tSide === 'SHORT' ? (Number(tPrice) > tPriceNow ? ' (short at a bounce)' : ' (short on a breakdown)') : (Number(tPrice) < tPriceNow ? ' (buy the dip)' : ' (breakout entry)')}.`
                 : 'Pick a price above the current price to wait for a rise, or below it to wait for a fall.'}
             </small>
           </label>
         )}
-        <button className="btn primary" disabled={busy || (tSide === 'BUY' && !tAmount) || (tMode === 'price' && !tPrice)} onClick={submitTrade}>
-          {tMode === 'now' ? (tSide === 'BUY' ? `Buy ${tCoin} now` : `Sell ${tPercent}% of ${tCoin} now`) : `Watch ${tCoin} and ${tSide === 'BUY' ? 'buy' : 'sell'}`}
+        <button className="btn primary" disabled={busy || (tOpens && !tAmount) || (tMode === 'price' && !tPrice)} onClick={submitTrade}>
+          {tMode === 'now' ? (tOpens ? `${sideWord(tSide)} ${tCoin} now` : `${sideWord(tSide)} ${tPercent}% of ${tCoin} now`) : `Watch ${tCoin} and ${sideWord(tSide).toLowerCase()}`}
         </button>
         <small className="muted">Orders at the live price fill instantly with a small cost and slippage. Price orders are checked every few seconds while the server is awake, and need the cash or coins to be there when they trigger.</small>
       </Section>
@@ -568,7 +575,7 @@ function Dashboard({ showToast }: { showToast: (t: { msg: string }) => void }) {
           {watchingOrders.map(o => (
             <div key={o.id} className="card suggestion">
               <div className="row between">
-                <div className="row gap"><Coin symbol={o.symbol} /><div><b>{o.side === 'BUY' ? 'Buy' : 'Sell'} {o.symbol}</b><small className="muted block">{o.side === 'BUY' ? `about ${inr(o.amount ?? 0)}` : `${qtyText(o.qty)} coins`} when price {o.triggerDir === 'ABOVE' ? 'rises to' : 'falls to'} {o.triggerPrice != null ? inr(o.triggerPrice) : ''}</small></div></div>
+                <div className="row gap"><Coin symbol={o.symbol} /><div><b>{sideWord(o.side)} {o.symbol}</b><small className="muted block">{o.side === 'BUY' || o.side === 'SHORT' ? `about ${inr(o.amount ?? 0)}` : `${qtyText(o.qty)} coins`} when price {o.triggerDir === 'ABOVE' ? 'rises to' : 'falls to'} {o.triggerPrice != null ? inr(o.triggerPrice) : ''}</small></div></div>
                 <span className="badge suggested">watching</span>
               </div>
               {prices[o.symbol] != null && <small className="muted">Now {inr(prices[o.symbol])}</small>}
@@ -588,7 +595,7 @@ function Dashboard({ showToast }: { showToast: (t: { msg: string }) => void }) {
           const pnl = lp?.pnl ?? p.pnl
           return (
             <div key={p.symbol} className="card holding">
-              <div className="row gap"><Coin symbol={p.symbol} /><div><b>{p.symbol}</b><small className="muted block">{qtyText(p.qty)} · now {price != null ? inr(price) : 'n/a'}</small></div></div>
+              <div className="row gap"><Coin symbol={p.symbol} /><div><b>{p.symbol}{p.side === 'SHORT' && <span className="badge sell short-tag">SHORT</span>}</b><small className="muted block">{qtyText(p.qty)}{p.side === 'SHORT' ? ` · entry ${inr(p.avgCost)}` : ''} · now {price != null ? inr(price) : 'n/a'}</small></div></div>
               <div className="right">
                 <b>{value != null ? inr(value) : 'n/a'}</b>
                 {pnl != null && <span className={`pnl ${pnl >= 0 ? 'up' : 'down'}`}>{pnl >= 0 ? '+' : '-'}{inr(Math.abs(pnl))}</span>}
@@ -620,7 +627,7 @@ function Dashboard({ showToast }: { showToast: (t: { msg: string }) => void }) {
         {history.map(o => (
           <div key={o.id} className="activity">
             <div className="row between">
-              <div className="row gap"><Coin symbol={o.symbol} /><div><b>{o.side === 'BUY' ? 'Bought' : 'Sold'} {o.symbol}</b><small className="muted block">{o.source === 'USER' ? 'You' : 'AI'} · {o.decidedOn}{o.fillPrice != null ? ` · at ${inr(o.fillPrice)}` : ''}</small></div></div>
+              <div className="row gap"><Coin symbol={o.symbol} /><div><b>{sidePast(o.side)} {o.symbol}</b><small className="muted block">{o.source === 'USER' ? 'You' : o.source === 'SYSTEM' ? 'Auto-close' : 'AI'} · {o.decidedOn}{o.fillPrice != null ? ` · at ${inr(o.fillPrice)}` : ''}</small></div></div>
               <span className={`badge ${o.status.toLowerCase()}`}>{o.status.toLowerCase()}</span>
             </div>
             {o.reason && <small className="muted">{o.reason}</small>}

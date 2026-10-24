@@ -114,15 +114,16 @@ final class CryptoAnalysis {
             lot.fees = lot.fees.add(fee);
             feesTotal = feesTotal.add(fee);
             src.filled++;
-            if ("BUY".equals(o.side)) {
+            if ("BUY".equals(o.side) || "SHORT".equals(o.side)) {
                 buys++;
-                BigDecimal totalCost = lot.avg.multiply(lot.qty).add(value).add(fee);
+                BigDecimal totalCost = lot.avg.multiply(lot.qty).add(value).add("BUY".equals(o.side) ? fee : fee.negate());
                 lot.qty = lot.qty.add(o.qty);
                 lot.avg = lot.qty.signum() == 0 ? BigDecimal.ZERO : totalCost.divide(lot.qty, 8, RoundingMode.HALF_UP);
             } else {
                 sells++;
                 src.sells++;
-                BigDecimal realized = value.subtract(fee).subtract(lot.avg.multiply(o.qty));
+                BigDecimal realized = "COVER".equals(o.side) ? lot.avg.multiply(o.qty).subtract(value).subtract(fee)
+                    : value.subtract(fee).subtract(lot.avg.multiply(o.qty));
                 lot.realized = lot.realized.add(realized);
                 realizedTotal = realizedTotal.add(realized);
                 src.realized = src.realized.add(realized);
@@ -151,9 +152,9 @@ final class CryptoAnalysis {
             Lot lot = lots.getOrDefault(sym, new Lot());
             BigDecimal px = prices.get(sym);
             BigDecimal qty = pos == null ? BigDecimal.ZERO : pos.qty;
-            BigDecimal value = px == null ? BigDecimal.ZERO : px.multiply(qty);
+            BigDecimal value = px == null || pos == null ? BigDecimal.ZERO : CryptoEngine.value(pos, px);
             coinsValue = coinsValue.add(value);
-            BigDecimal unrealized = pos == null || px == null ? BigDecimal.ZERO : value.subtract(pos.avgCost.multiply(qty));
+            BigDecimal unrealized = pos == null || px == null ? BigDecimal.ZERO : CryptoEngine.pnl(pos, px);
             double share = equity.signum() == 0 ? 0 : value.doubleValue() / equity.doubleValue() * 100;
             coins.add(new CoinStat(sym, qty.stripTrailingZeros(), px, r(value), r(share), pos == null ? null : pos.avgCost.setScale(2, RoundingMode.HALF_UP),
                 r(unrealized), r(lot.realized), r(lot.fees), lot.trades));

@@ -86,8 +86,8 @@ class Notifier {
     static String tradesBody(List<CryptoOrder> orders, BigDecimal equity, BigDecimal cash, String appUrl, String headline) {
         StringBuilder sb = new StringBuilder(headline).append("\n\n");
         for (CryptoOrder o : orders) {
-            String side = "BUY".equals(o.side) ? "Bought" : "Sold";
-            if ("SUGGESTED".equals(o.status)) side = "BUY".equals(o.side) ? "Suggested buy of" : "Suggested sell of";
+            String side = switch (o.side) { case "BUY" -> "Bought"; case "SELL" -> "Sold"; case "SHORT" -> "Opened a short on"; default -> "Closed the short on"; };
+            if ("SUGGESTED".equals(o.status)) side = switch (o.side) { case "BUY" -> "Suggested buy of"; case "SELL" -> "Suggested sell of"; case "SHORT" -> "Suggested short on"; default -> "Suggested cover of"; };
             sb.append("- ").append(side).append(' ').append(o.qty == null ? "" : o.qty.stripTrailingZeros().toPlainString()).append(' ').append(o.symbol);
             if (o.fillPrice != null) sb.append(" at ").append(money(o.fillPrice)).append(" (fee ").append(money(o.fees)).append(')');
             else if (o.amountInr != null) sb.append(", about ").append(money(o.amountInr));

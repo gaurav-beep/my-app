@@ -116,7 +116,7 @@ class LlmClient {
     }
 }
 
-record PositionView(String symbol, BigDecimal qty, BigDecimal avgCost, BigDecimal price, BigDecimal value, BigDecimal pnl) {}
+record PositionView(String symbol, BigDecimal qty, BigDecimal avgCost, BigDecimal price, BigDecimal value, BigDecimal pnl, String side) {}
 
 record OrderView(Long id, String symbol, String side, BigDecimal qty, String status, String reason, LocalDate decidedOn,
                  BigDecimal fillPrice, BigDecimal fees, BigDecimal amount, BigDecimal triggerPrice, String triggerDir, String source) {}
