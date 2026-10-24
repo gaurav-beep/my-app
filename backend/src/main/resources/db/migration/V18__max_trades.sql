@@ -1,0 +1,1 @@
+ALTER TABLE crypto_account ADD COLUMN max_trades INTEGER NOT NULL DEFAULT 4;

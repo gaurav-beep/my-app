@@ -63,6 +63,8 @@ class CryptoAccount {
     int checkMinutes = 60;
     @Column(name = "events_on")
     boolean eventsOn = true;
+    @Column(name = "max_trades")
+    int maxTrades = 4;
     @Column(name = "calls_day")
     LocalDate callsDay;
     @Column(name = "calls_count")
@@ -573,6 +575,18 @@ class CryptoEngine {
         reject(o, "[declined]");
     }
 
+    int aiTradesToday(Long userId) {
+        LocalDate today = LocalDate.now(IST);
+        return (int) orders.findByUserId(userId).stream()
+            .filter(o -> "FILLED".equals(o.status) && "AI".equals(o.source) && today.equals(o.decidedOn)).count();
+    }
+
+    static List<Proposal> limitOrders(List<Proposal> props, int max) {
+        List<Proposal> sorted = new ArrayList<>(props);
+        sorted.sort(Comparator.comparing((Proposal p) -> p.side().equals("SELL") || p.side().equals("COVER") ? 0 : 1));
+        return sorted.size() <= max ? sorted : new ArrayList<>(sorted.subList(0, max));
+    }
+
     static final int MAX_CALLS_PER_DAY = 24;
     static final Set<Integer> CHECK_CHOICES = Set.of(30, 60, 120, 240);
     final Set<Long> eventTargets = ConcurrentHashMap.newKeySet();
@@ -586,6 +600,8 @@ class CryptoEngine {
         LocalDateTime now = LocalDateTime.now(ZoneOffset.UTC);
         if (a.lastAttemptAt != null && a.lastAttemptAt.isAfter(now.minusMinutes(manual ? 2 : trigger != null ? 10 : 15))) return "Tried recently. Please wait a bit.";
         if (manual && a.lastDecisionAt != null && a.lastDecisionAt.isAfter(now.minusMinutes(15))) return "The AI decided less than 15 minutes ago.";
+        int tradesLeft = a.maxTrades <= 0 ? MAX_ORDERS : Math.max(0, a.maxTrades - aiTradesToday(a.userId));
+        if (tradesLeft == 0) return "The AI has reached your limit of " + a.maxTrades + " trades for today. It continues tomorrow (India time).";
         LocalDate today = LocalDate.now(ZoneOffset.UTC);
         if (!today.equals(a.callsDay)) {
             a.callsDay = today;
@@ -607,6 +623,7 @@ class CryptoEngine {
         String sentimentText = sentiment.block();
         if (!sentimentText.isBlank()) lines.add("\n" + sentimentText);
         if (trigger != null) lines.add("\nMarket alert that triggered this check: " + trigger + ".\n");
+        if (a.maxTrades > 0) lines.add("\nDaily trade limit: you may place at most " + tradesLeft + " more order(s) today, so save them for clear opportunities. Closing a position counts as an order.\n");
         if (last.size() < 5) return "Market data is unavailable right now.";
 
         List<CryptoPosition> pos = new ArrayList<>(positions.findByUserId(a.userId));
@@ -620,7 +637,7 @@ class CryptoEngine {
         }
         Map<String, BigDecimal> held = new LinkedHashMap<>();
         for (CryptoPosition p : pos) held.put(p.isShort() ? p.symbol + ":SHORT" : p.symbol, p.qty);
-        List<Proposal> props = validate(reply.get(), a.cash, equity, held, last);
+        List<Proposal> props = limitOrders(validate(reply.get(), a.cash, equity, held, last), tradesLeft);
         List<CryptoOrder> created = new ArrayList<>();
         for (Proposal p : props) {
             CryptoOrder o = new CryptoOrder();
@@ -801,8 +818,10 @@ class CryptoPaperController {
     void schedule(@AuthenticationPrincipal Jwt jwt, @RequestBody ScheduleIn in) {
         CryptoAccount a = account(jwt);
         if (!CryptoEngine.CHECK_CHOICES.contains(in.minutes())) throw new ResponseStatusException(HttpStatus.BAD_REQUEST, "Choose 30, 60, 120 or 240 minutes");
+        if (in.maxTrades() != null && (in.maxTrades() < 0 || in.maxTrades() > 50)) throw new ResponseStatusException(HttpStatus.BAD_REQUEST, "Daily trade limit must be 0 to 50 (0 means no limit)");
         a.checkMinutes = in.minutes();
         a.eventsOn = in.events();
+        if (in.maxTrades() != null) a.maxTrades = in.maxTrades();
         accounts.save(a);
         if (a.eventsOn) engine.eventTargets.add(a.userId);
         else engine.eventTargets.remove(a.userId);
@@ -917,6 +936,6 @@ class CryptoPaperController {
                 o.decidedOn, o.fillPrice, o.fees, o.amountInr, o.triggerPrice, o.triggerDir, o.source)).toList();
         List<SnapView> hv = snapshots.findByUserIdOrderByDayAsc(a.userId).stream().map(s -> new SnapView(s.day, s.equity, s.benchmark)).toList();
         LocalDate decided = a.lastDecisionAt == null ? null : a.lastDecisionAt.atZone(ZoneOffset.UTC).withZoneSameInstant(IST).toLocalDate();
-        return new PaperView(a.cash, a.startCash, a.startBenchmark, equity, ret, benchPct, pv, ov, hv, a.lastSummary, decided, a.autoTrade, a.strategy, a.notifyEmail, notifier.configured(), a.protectOn, a.stopLossPct, a.takeProfitPct, a.checkMinutes, a.eventsOn);
+        return new PaperView(a.cash, a.startCash, a.startBenchmark, equity, ret, benchPct, pv, ov, hv, a.lastSummary, decided, a.autoTrade, a.strategy, a.notifyEmail, notifier.configured(), a.protectOn, a.stopLossPct, a.takeProfitPct, a.checkMinutes, a.eventsOn, a.maxTrades, engine.aiTradesToday(a.userId));
     }
 }

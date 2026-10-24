@@ -77,6 +77,18 @@ class CryptoEngineTest {
     }
 
     @Test
+    void tradeLimitKeepsClosingOrdersFirst() {
+        var buy = new CryptoEngine.Proposal("BUY", "BTC", new BigDecimal("500"), "a");
+        var sell = new CryptoEngine.Proposal("SELL", "ETH", new BigDecimal("500"), "b");
+        var cover = new CryptoEngine.Proposal("COVER", "SOL", new BigDecimal("500"), "c");
+        var out = CryptoEngine.limitOrders(List.of(buy, sell, cover), 2);
+        assertEquals(2, out.size());
+        assertEquals("SELL", out.get(0).side());
+        assertEquals("COVER", out.get(1).side());
+        assertEquals(3, CryptoEngine.limitOrders(List.of(buy, sell, cover), 4).size());
+    }
+
+    @Test
     void sellingMostOfAHoldingSellsItAll() throws Exception {
         var out = CryptoEngine.validate(json("""
             {"orders":[{"side":"SELL","symbol":"DOGE","amount_inr":990,"reason":"exit"}]}"""),

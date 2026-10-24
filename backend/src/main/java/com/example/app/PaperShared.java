@@ -36,7 +36,7 @@ record AmountIn(BigDecimal amount) {}
 
 record AutoIn(boolean enabled) {}
 
-record ScheduleIn(int minutes, boolean events) {}
+record ScheduleIn(int minutes, boolean events, Integer maxTrades) {}
 
 record ProtectIn(boolean enabled, BigDecimal stopLossPct, BigDecimal takeProfitPct) {}
 
@@ -131,4 +131,4 @@ record PaperView(BigDecimal cash, BigDecimal startCash, BigDecimal startBenchmar
                  BigDecimal benchmarkPct, List<PositionView> positions, List<OrderView> orders, List<SnapView> history,
                  String lastSummary, LocalDate lastDecisionOn, boolean autoTrade, String strategy,
                  boolean notifyEmail, boolean emailConfigured, boolean protectOn, BigDecimal stopLossPct, BigDecimal takeProfitPct,
-                 int checkMinutes, boolean eventsOn) {}
+                 int checkMinutes, boolean eventsOn, int maxTrades, int aiTradesToday) {}
