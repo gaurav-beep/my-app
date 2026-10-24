@@ -1,0 +1,3 @@
+ALTER TABLE crypto_account ADD COLUMN protect_on BOOLEAN NOT NULL DEFAULT TRUE;
+ALTER TABLE crypto_account ADD COLUMN stop_loss_pct NUMERIC(6,2) NOT NULL DEFAULT 5;
+ALTER TABLE crypto_account ADD COLUMN take_profit_pct NUMERIC(6,2) NOT NULL DEFAULT 10;

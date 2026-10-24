@@ -260,3 +260,5 @@ select {
 .dot { display: inline-block; width: 10px; height: 10px; border-radius: 50%; margin-right: 0.3rem; }
 
 .short-tag{margin-left:6px;font-size:10px;vertical-align:middle}
+
+.grid2{display:grid;grid-template-columns:1fr 1fr;gap:0.75rem}

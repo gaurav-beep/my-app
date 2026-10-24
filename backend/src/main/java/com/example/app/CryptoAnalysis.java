@@ -107,7 +107,7 @@ final class CryptoAnalysis {
         for (CryptoOrder o : orders) {
             if (!"FILLED".equals(o.status) || o.qty == null || o.fillPrice == null) continue;
             Lot lot = lots.computeIfAbsent(o.symbol, k -> new Lot());
-            Src src = sources.computeIfAbsent(o.source == null ? "AI" : o.source, k -> new Src());
+            Src src = sources.computeIfAbsent(o.source == null || "PROTECT".equals(o.source) ? "AI" : o.source, k -> new Src());
             BigDecimal fee = o.fees == null ? BigDecimal.ZERO : o.fees;
             BigDecimal value = o.qty.multiply(o.fillPrice);
             lot.trades++;

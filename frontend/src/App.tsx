@@ -21,7 +21,7 @@ type PaperView = {
   orders: Order[]
   history: { day: string; equity: number; benchmark: number | null }[]
   lastSummary: string | null; lastDecisionOn: string | null; autoTrade: boolean; strategy: string | null
-  notifyEmail: boolean; emailConfigured: boolean
+  notifyEmail: boolean; emailConfigured: boolean; protectOn: boolean; stopLossPct: number; takeProfitPct: number
 }
 
 type LiveView = {
@@ -248,6 +248,8 @@ function Dashboard({ showToast }: { showToast: (t: { msg: string }) => void }) {
   const [tAmount, setTAmount] = useState('')
   const [tPercent, setTPercent] = useState(100)
   const [tPrice, setTPrice] = useState('')
+  const [slPct, setSlPct] = useState<string | null>(null)
+  const [tpPct, setTpPct] = useState<string | null>(null)
   const slow = useSlow(status === null)
   const [live, setLive] = useState<LiveView | null>(null)
   const [liveOk, setLiveOk] = useState(true)
@@ -627,7 +629,7 @@ function Dashboard({ showToast }: { showToast: (t: { msg: string }) => void }) {
         {history.map(o => (
           <div key={o.id} className="activity">
             <div className="row between">
-              <div className="row gap"><Coin symbol={o.symbol} /><div><b>{sidePast(o.side)} {o.symbol}</b><small className="muted block">{o.source === 'USER' ? 'You' : o.source === 'SYSTEM' ? 'Auto-close' : 'AI'} · {o.decidedOn}{o.fillPrice != null ? ` · at ${inr(o.fillPrice)}` : ''}</small></div></div>
+              <div className="row gap"><Coin symbol={o.symbol} /><div><b>{sidePast(o.side)} {o.symbol}</b><small className="muted block">{o.source === 'USER' ? 'You' : o.source === 'SYSTEM' ? 'Auto-close' : o.source === 'PROTECT' ? 'AI protection' : 'AI'} · {o.decidedOn}{o.fillPrice != null ? ` · at ${inr(o.fillPrice)}` : ''}</small></div></div>
               <span className={`badge ${o.status.toLowerCase()}`}>{o.status.toLowerCase()}</span>
             </div>
             {o.reason && <small className="muted">{o.reason}</small>}
@@ -658,6 +660,27 @@ function Dashboard({ showToast }: { showToast: (t: { msg: string }) => void }) {
           placeholder="For example: only trade BTC and ETH, buy after a 5% dip, sell when up 8%, never hold more than 2 coins." />
         <button className="btn" disabled={busy} onClick={() => act(`${BASE}/strategy`, 'Strategy saved', { text: strategy })}>Save strategy</button>
         <small className="muted">The AI reads this at its next check and tries to follow it. It is not a strict rules engine, and the safety limits always apply.</small>
+      </Section>
+
+      <Section title="Protection for AI trades" hint={view.protectOn ? `Stop ${view.stopLossPct}% · Target ${view.takeProfitPct}%` : 'Off'}>
+        <label className="switch">
+          <input type="checkbox" checked={view.protectOn} disabled={busy} aria-label="Protect AI trades"
+            onChange={e => act(`${BASE}/protection`, e.target.checked ? 'Protection on' : 'Protection off', { enabled: e.target.checked, stopLossPct: Number(slPct ?? view.stopLossPct), takeProfitPct: Number(tpPct ?? view.takeProfitPct) })} />
+          <span className="track"><span className="knob" /></span>
+          <span className="switch-label">Add a stop-loss and take-profit to every AI trade</span>
+        </label>
+        <div className="grid2">
+          <label className="field">
+            <span>Stop-loss (%)</span>
+            <input inputMode="decimal" value={slPct ?? String(view.stopLossPct)} onChange={e => setSlPct(e.target.value.replace(/[^0-9.]/g, ''))} aria-label="Stop-loss percent" />
+          </label>
+          <label className="field">
+            <span>Take-profit (%)</span>
+            <input inputMode="decimal" value={tpPct ?? String(view.takeProfitPct)} onChange={e => setTpPct(e.target.value.replace(/[^0-9.]/g, ''))} aria-label="Take-profit percent" />
+          </label>
+        </div>
+        <button className="btn" disabled={busy} onClick={() => act(`${BASE}/protection`, 'Protection saved', { enabled: view.protectOn, stopLossPct: Number(slPct ?? view.stopLossPct), takeProfitPct: Number(tpPct ?? view.takeProfitPct) })}>Save percentages</button>
+        <small className="muted">When the AI opens a position, two price orders are placed for it, one below the entry (stop-loss) and one above (take-profit). They work the other way round for shorts. When one triggers, the other is cancelled. You see them under "Waiting for your price" and can cancel them. Use 0 to switch one off. They only run while the server is awake.</small>
       </Section>
 
       <Section title="Email alerts" hint={view.emailConfigured ? (view.notifyEmail ? 'On' : 'Off') : 'Not set up'}>

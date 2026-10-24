@@ -51,6 +51,12 @@ class CryptoAccount {
     String strategy;
     @Column(name = "notify_email")
     boolean notifyEmail = true;
+    @Column(name = "protect_on")
+    boolean protectOn = true;
+    @Column(name = "stop_loss_pct")
+    BigDecimal stopLossPct = new BigDecimal("5");
+    @Column(name = "take_profit_pct")
+    BigDecimal takeProfitPct = new BigDecimal("10");
 }
 
 @Entity
@@ -410,6 +416,42 @@ class CryptoEngine {
         o.status = "FILLED";
         orders.save(o);
         accounts.save(a);
+        if (opening && "AI".equals(o.source) && a.protectOn) attachProtection(a, held);
+        else if (!opening && !pos.contains(held)) cancelProtection(a.userId, o.symbol);
+    }
+
+    void cancelProtection(Long userId, String symbol) {
+        for (CryptoOrder w : orders.findByUserIdAndStatus(userId, "WATCHING")) {
+            if (!"PROTECT".equals(w.source) || !w.symbol.equals(symbol)) continue;
+            w.status = "CANCELLED";
+            orders.save(w);
+        }
+    }
+
+    private void protect(CryptoPosition p, BigDecimal pct, boolean stop, String dir) {
+        BigDecimal factor = BigDecimal.ONE.add(pct.divide(BigDecimal.valueOf(100)).multiply(BigDecimal.valueOf("ABOVE".equals(dir) ? 1 : -1)));
+        BigDecimal trigger = p.avgCost.multiply(factor).setScale(4, RoundingMode.HALF_UP);
+        CryptoOrder w = new CryptoOrder();
+        w.userId = p.userId;
+        w.symbol = p.symbol;
+        w.side = p.isShort() ? "COVER" : "SELL";
+        w.qty = p.qty;
+        w.amountInr = p.qty.multiply(trigger).multiply(BigDecimal.valueOf(2)).setScale(2, RoundingMode.UP);
+        w.decidedOn = LocalDate.now(IST);
+        w.source = "PROTECT";
+        w.status = "WATCHING";
+        w.triggerPrice = trigger;
+        w.triggerDir = dir;
+        w.reason = (stop ? "Automatic stop-loss" : "Automatic take-profit") + " at " + pct.stripTrailingZeros().toPlainString() + "%";
+        orders.save(w);
+    }
+
+    void attachProtection(CryptoAccount a, CryptoPosition p) {
+        cancelProtection(a.userId, p.symbol);
+        boolean sh = p.isShort();
+        if (a.stopLossPct != null && a.stopLossPct.signum() > 0) protect(p, a.stopLossPct, true, sh ? "ABOVE" : "BELOW");
+        if (a.takeProfitPct != null && a.takeProfitPct.signum() > 0) protect(p, a.takeProfitPct, false, sh ? "BELOW" : "ABOVE");
+        watching.set(-1);
     }
 
     static final int MAX_WATCHING = 10;
@@ -466,7 +508,7 @@ class CryptoEngine {
         if (trigger) {
             String dir = triggerDir(ref, px);
             if (dir == null) throw bad("Pick a price different from the current price");
-            if (orders.countByUserIdAndStatus(a.userId, "WATCHING") >= MAX_WATCHING) throw bad("You can watch up to " + MAX_WATCHING + " orders at once. Cancel one first.");
+            if (orders.findByUserIdAndStatus(a.userId, "WATCHING").stream().filter(w -> !"PROTECT".equals(w.source)).count() >= MAX_WATCHING) throw bad("You can watch up to " + MAX_WATCHING + " orders at once. Cancel one first.");
             o.status = "WATCHING";
             o.triggerPrice = ref.setScale(4, RoundingMode.HALF_UP);
             o.triggerDir = dir;
@@ -507,10 +549,10 @@ class CryptoEngine {
                 CryptoAccount a = accounts.findById(o.userId).orElse(null);
                 if (a == null) continue;
                 fill(a, o, new ArrayList<>(positions.findByUserId(a.userId)));
-                notifyTrades(a, List.of(o), "Your price order was triggered.");
+                notifyTrades(a, List.of(o), "PROTECT".equals(o.source) ? "Automatic protection on an AI trade triggered." : "Your price order was triggered.");
                 left--;
             }
-            watching.set(left);
+            watching.set(left > 0 ? left : orders.findByStatus("WATCHING").isEmpty() ? 0 : -1);
         } catch (Exception e) {
             log.warn("Price order check failed: {}", e.toString());
         }
@@ -696,6 +738,18 @@ class CryptoPaperController {
         accounts.save(a);
     }
 
+    @PostMapping("/protection") @ResponseStatus(HttpStatus.NO_CONTENT)
+    void protection(@AuthenticationPrincipal Jwt jwt, @RequestBody ProtectIn in) {
+        CryptoAccount a = account(jwt);
+        BigDecimal sl = in.stopLossPct() == null ? BigDecimal.ZERO : in.stopLossPct();
+        BigDecimal tp = in.takeProfitPct() == null ? BigDecimal.ZERO : in.takeProfitPct();
+        if (sl.signum() < 0 || sl.compareTo(BigDecimal.valueOf(50)) > 0 || tp.signum() < 0 || tp.compareTo(BigDecimal.valueOf(200)) > 0) throw new ResponseStatusException(HttpStatus.BAD_REQUEST, "Stop-loss can be 0 to 50 percent and take-profit 0 to 200 percent");
+        a.protectOn = in.enabled();
+        a.stopLossPct = sl.setScale(2, RoundingMode.HALF_UP);
+        a.takeProfitPct = tp.setScale(2, RoundingMode.HALF_UP);
+        accounts.save(a);
+    }
+
     @PostMapping("/notify") @ResponseStatus(HttpStatus.NO_CONTENT)
     void notify(@AuthenticationPrincipal Jwt jwt, @RequestBody AutoIn in) {
         CryptoAccount a = account(jwt);
@@ -805,6 +859,6 @@ class CryptoPaperController {
                 o.decidedOn, o.fillPrice, o.fees, o.amountInr, o.triggerPrice, o.triggerDir, o.source)).toList();
         List<SnapView> hv = snapshots.findByUserIdOrderByDayAsc(a.userId).stream().map(s -> new SnapView(s.day, s.equity, s.benchmark)).toList();
         LocalDate decided = a.lastDecisionAt == null ? null : a.lastDecisionAt.atZone(ZoneOffset.UTC).withZoneSameInstant(IST).toLocalDate();
-        return new PaperView(a.cash, a.startCash, a.startBenchmark, equity, ret, benchPct, pv, ov, hv, a.lastSummary, decided, a.autoTrade, a.strategy, a.notifyEmail, notifier.configured());
+        return new PaperView(a.cash, a.startCash, a.startBenchmark, equity, ret, benchPct, pv, ov, hv, a.lastSummary, decided, a.autoTrade, a.strategy, a.notifyEmail, notifier.configured(), a.protectOn, a.stopLossPct, a.takeProfitPct);
     }
 }
