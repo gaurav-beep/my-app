@@ -22,7 +22,7 @@ import com.fasterxml.jackson.databind.JsonNode;
 class PriceService {
     record Quote(BigDecimal price, String asOf, Instant fetchedAt) {}
 
-    record Candle(long time, BigDecimal open, BigDecimal close) {}
+    record Candle(long time, BigDecimal open, BigDecimal close, BigDecimal high, BigDecimal low, BigDecimal volume) {}
 
     private static final Logger log = LoggerFactory.getLogger(PriceService.class);
 
@@ -53,7 +53,9 @@ class PriceService {
             if (n != null && n.isArray()) {
                 for (JsonNode x : n) {
                     if (x.path("close").isNumber() && x.path("open").isNumber()) {
-                        out.add(new Candle(x.path("time").asLong(), x.path("open").decimalValue(), x.path("close").decimalValue()));
+                        out.add(new Candle(x.path("time").asLong(), x.path("open").decimalValue(), x.path("close").decimalValue(),
+                            x.path("high").isNumber() ? x.path("high").decimalValue() : null, x.path("low").isNumber() ? x.path("low").decimalValue() : null,
+                            x.path("volume").isNumber() ? x.path("volume").decimalValue() : null));
                     }
                 }
             }

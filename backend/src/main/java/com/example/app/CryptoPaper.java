@@ -162,9 +162,11 @@ class CryptoEngine {
     private final PriceService prices;
     private final LlmClient llm;
     private final Notifier notifier;
+    private final Sentiment sentiment;
 
     CryptoEngine(CryptoAccountRepository accounts, CryptoPositionRepository positions, CryptoOrderRepository orders,
-                 CryptoSnapshotRepository snapshots, PriceService prices, LlmClient llm, Notifier notifier) {
+                 CryptoSnapshotRepository snapshots, PriceService prices, LlmClient llm, Notifier notifier, Sentiment sentiment) {
+        this.sentiment = sentiment;
         this.accounts = accounts;
         this.positions = positions;
         this.orders = orders;
@@ -257,7 +259,7 @@ class CryptoEngine {
             for (int i = h - 12; i < h; i++) sb.append(hourly.get(i).close().setScale(price.compareTo(BigDecimal.valueOf(100)) > 0 ? 0 : 4, RoundingMode.HALF_UP)).append(i < h - 1 ? "," : "");
             sb.append("]");
         }
-        return sb.append("\n").toString();
+        return sb.append(Indicators.summary(hourly, daily)).append("\n").toString();
     }
 
     static String buildPrompt(CryptoAccount a, List<CryptoPosition> pos, Map<String, BigDecimal> lastPrice, List<String> coinLines, BigDecimal equity) {
@@ -287,7 +289,7 @@ class CryptoEngine {
             sb.append("- ").append(p.symbol).append(": ").append(p.qty.stripTrailingZeros().toPlainString()).append(" units, average cost ").append(p.avgCost.setScale(2, RoundingMode.HALF_UP))
               .append(px == null ? "" : ", worth " + p.qty.multiply(px).setScale(2, RoundingMode.HALF_UP)).append("\n");
         }
-        sb.append("\nMarket data (INR):\n");
+        sb.append("\nMarket data (INR). Suffix h means hourly and d means daily. RSI below 30 is oversold and above 70 overbought. SMA is the simple moving average, ATR the typical daily move, and 30d range position is 0% at the 30-day low and 100% at the high:\n");
         coinLines.forEach(sb::append);
         sb.append("\nReply with JSON only, in exactly this shape:\n")
           .append("{\"summary\":\"one or two sentences on your view\",\"orders\":[{\"side\":\"BUY\",\"symbol\":\"BTC\",\"amount_inr\":2000,\"reason\":\"short reason\"}]}\n")
@@ -574,8 +576,10 @@ class CryptoEngine {
             BigDecimal px = price(coin);
             if (px == null) continue;
             last.put(coin, px);
-            lines.add(coinLine(coin, px, prices.candles(coin, "1h", 30), prices.candles(coin, "1d", 10)));
+            lines.add(coinLine(coin, px, prices.candles(coin, "1h", 100), prices.candles(coin, "1d", 60)));
         }
+        String sentimentText = sentiment.block();
+        if (!sentimentText.isBlank()) lines.add("\n" + sentimentText);
         if (last.size() < 5) return "Market data is unavailable right now.";
 
         List<CryptoPosition> pos = new ArrayList<>(positions.findByUserId(a.userId));
