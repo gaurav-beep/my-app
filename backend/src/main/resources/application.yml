@@ -9,6 +9,9 @@ spring:
 app:
   jwt-secret: ${APP_JWT_SECRET}
   google-client-id: ${GOOGLE_CLIENT_ID:}
+  resend-key: ${RESEND_API_KEY:}
+  mail-from: ${MAIL_FROM:AI Crypto Lab <onboarding@resend.dev>}
+  app-url: ${APP_URL:https://my-app-frontend-o8n7.onrender.com}
   gemini-key: ${GEMINI_API_KEY:}
   gemini-model: ${GEMINI_MODEL:gemini-3.8-flash}
 management:

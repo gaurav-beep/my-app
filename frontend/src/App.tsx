@@ -21,6 +21,7 @@ type PaperView = {
   orders: Order[]
   history: { day: string; equity: number; benchmark: number | null }[]
   lastSummary: string | null; lastDecisionOn: string | null; autoTrade: boolean; strategy: string | null
+  notifyEmail: boolean; emailConfigured: boolean
 }
 
 type LiveView = {
@@ -650,6 +651,21 @@ function Dashboard({ showToast }: { showToast: (t: { msg: string }) => void }) {
           placeholder="For example: only trade BTC and ETH, buy after a 5% dip, sell when up 8%, never hold more than 2 coins." />
         <button className="btn" disabled={busy} onClick={() => act(`${BASE}/strategy`, 'Strategy saved', { text: strategy })}>Save strategy</button>
         <small className="muted">The AI reads this at its next check and tries to follow it. It is not a strict rules engine, and the safety limits always apply.</small>
+      </Section>
+
+      <Section title="Email alerts" hint={view.emailConfigured ? (view.notifyEmail ? 'On' : 'Off') : 'Not set up'}>
+        {view.emailConfigured ? (
+          <>
+            <label className="switch">
+              <input type="checkbox" checked={view.notifyEmail} disabled={busy} aria-label="Email me about trades"
+                onChange={e => act(`${BASE}/notify`, e.target.checked ? 'Email alerts on' : 'Email alerts off', { enabled: e.target.checked })} />
+              <span className="track"><span className="knob" /></span>
+              <span className="switch-label">Email me when the AI trades or suggests a trade</span>
+            </label>
+            <small className="muted">Emails go to the Google address you signed in with. They also cover your own price orders when they trigger. Check your spam folder the first time.</small>
+            <button className="btn" disabled={busy} onClick={() => act(`${BASE}/notify/test`)}>Send a test email</button>
+          </>
+        ) : <p className="muted small">Email alerts are not set up on the server yet.</p>}
       </Section>
 
       <Section title="Account" hint="Add money or reset">

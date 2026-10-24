@@ -1,0 +1,1 @@
+ALTER TABLE crypto_account ADD COLUMN notify_email BOOLEAN NOT NULL DEFAULT TRUE;

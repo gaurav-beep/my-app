@@ -125,4 +125,5 @@ record SnapView(LocalDate day, BigDecimal equity, BigDecimal benchmark) {}
 
 record PaperView(BigDecimal cash, BigDecimal startCash, BigDecimal startBenchmark, BigDecimal equity, BigDecimal returnPct,
                  BigDecimal benchmarkPct, List<PositionView> positions, List<OrderView> orders, List<SnapView> history,
-                 String lastSummary, LocalDate lastDecisionOn, boolean autoTrade, String strategy) {}
+                 String lastSummary, LocalDate lastDecisionOn, boolean autoTrade, String strategy,
+                 boolean notifyEmail, boolean emailConfigured) {}

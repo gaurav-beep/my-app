@@ -49,6 +49,8 @@ class CryptoAccount {
     @Column(name = "auto_trade")
     boolean autoTrade;
     String strategy;
+    @Column(name = "notify_email")
+    boolean notifyEmail = true;
 }
 
 @Entity
@@ -149,15 +151,26 @@ class CryptoEngine {
     private final CryptoSnapshotRepository snapshots;
     private final PriceService prices;
     private final LlmClient llm;
+    private final Notifier notifier;
 
     CryptoEngine(CryptoAccountRepository accounts, CryptoPositionRepository positions, CryptoOrderRepository orders,
-                 CryptoSnapshotRepository snapshots, PriceService prices, LlmClient llm) {
+                 CryptoSnapshotRepository snapshots, PriceService prices, LlmClient llm, Notifier notifier) {
         this.accounts = accounts;
         this.positions = positions;
         this.orders = orders;
         this.snapshots = snapshots;
         this.prices = prices;
         this.llm = llm;
+        this.notifier = notifier;
+    }
+
+    void notifyTrades(CryptoAccount a, List<CryptoOrder> list, String headline) {
+        if (!a.notifyEmail || !notifier.configured() || list.isEmpty()) return;
+        CryptoOrder first = list.get(0);
+        String what = (first.side.equals("BUY") ? "Buy " : "Sell ") + (first.qty == null ? "" : first.qty.stripTrailingZeros().toPlainString() + " ") + first.symbol;
+        String subject = list.size() == 1 ? "AI Crypto Lab: " + what : "AI Crypto Lab: " + list.size() + " trades";
+        BigDecimal equity = equity(a, positions.findByUserId(a.userId));
+        notifier.sendAsync(a.userId, subject, Notifier.tradesBody(list, equity, a.cash, notifier.appUrl(), headline));
     }
 
     static String cleanStrategy(String text) {
@@ -446,6 +459,7 @@ class CryptoEngine {
                 CryptoAccount a = accounts.findById(o.userId).orElse(null);
                 if (a == null) continue;
                 fill(a, o, new ArrayList<>(positions.findByUserId(a.userId)));
+                notifyTrades(a, List.of(o), "Your price order was triggered.");
                 left--;
             }
             watching.set(left);
@@ -514,9 +528,13 @@ class CryptoEngine {
         a.lastDecisionAt = now;
         accounts.save(a);
         if (props.isEmpty()) return "The AI suggests holding for now.";
-        if (!a.autoTrade) return "The AI has " + props.size() + " suggestion(s) for you to approve or decline.";
+        if (!a.autoTrade) {
+            notifyTrades(a, created, "The AI has " + props.size() + " suggestion(s) waiting for your approval.");
+            return "The AI has " + props.size() + " suggestion(s) for you to approve or decline.";
+        }
         created.sort(Comparator.comparing((CryptoOrder o) -> o.side.equals("SELL") ? 0 : 1).thenComparing(o -> o.id));
         for (CryptoOrder o : created) fill(a, o, pos);
+        notifyTrades(a, created, "The AI traded for you automatically.");
         return "The AI traded automatically: " + props.size() + " order(s) placed.";
     }
 
@@ -565,8 +583,11 @@ class CryptoPaperController {
     private final CryptoOrderRepository orders;
     private final CryptoSnapshotRepository snapshots;
 
+    private final Notifier notifier;
+
     CryptoPaperController(CryptoEngine engine, LlmClient llm, CryptoAccountRepository accounts, CryptoPositionRepository positions,
-                          CryptoOrderRepository orders, CryptoSnapshotRepository snapshots) {
+                          CryptoOrderRepository orders, CryptoSnapshotRepository snapshots, Notifier notifier) {
+        this.notifier = notifier;
         this.engine = engine;
         this.llm = llm;
         this.accounts = accounts;
@@ -600,6 +621,21 @@ class CryptoPaperController {
         CryptoAccount a = account(jwt);
         a.autoTrade = in.enabled();
         accounts.save(a);
+    }
+
+    @PostMapping("/notify") @ResponseStatus(HttpStatus.NO_CONTENT)
+    void notify(@AuthenticationPrincipal Jwt jwt, @RequestBody AutoIn in) {
+        CryptoAccount a = account(jwt);
+        a.notifyEmail = in.enabled();
+        accounts.save(a);
+    }
+
+    @PostMapping("/notify/test")
+    Map<String, String> notifyTest(@AuthenticationPrincipal Jwt jwt) {
+        CryptoAccount a = account(jwt);
+        String err = notifier.sendNow(a.userId, "AI Crypto Lab: test email",
+            "This is a test email from AI Crypto Lab.\n\nIf you can read this, trade notifications will reach you here.\n\nOpen the app: " + notifier.appUrl() + "\n");
+        return Map.of("message", err == null ? "Test email sent. Check your inbox and spam folder." : "Could not send: " + err);
     }
 
     @PostMapping("/strategy") @ResponseStatus(HttpStatus.NO_CONTENT)
@@ -695,6 +731,6 @@ class CryptoPaperController {
                 o.decidedOn, o.fillPrice, o.fees, o.amountInr, o.triggerPrice, o.triggerDir, o.source)).toList();
         List<SnapView> hv = snapshots.findByUserIdOrderByDayAsc(a.userId).stream().map(s -> new SnapView(s.day, s.equity, s.benchmark)).toList();
         LocalDate decided = a.lastDecisionAt == null ? null : a.lastDecisionAt.atZone(ZoneOffset.UTC).withZoneSameInstant(IST).toLocalDate();
-        return new PaperView(a.cash, a.startCash, a.startBenchmark, equity, ret, benchPct, pv, ov, hv, a.lastSummary, decided, a.autoTrade, a.strategy);
+        return new PaperView(a.cash, a.startCash, a.startBenchmark, equity, ret, benchPct, pv, ov, hv, a.lastSummary, decided, a.autoTrade, a.strategy, a.notifyEmail, notifier.configured());
     }
 }
