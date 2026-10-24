@@ -1,0 +1,7 @@
+DROP TABLE IF EXISTS expense;
+DROP TABLE IF EXISTS holding;
+DROP TABLE IF EXISTS coindcx_link;
+DROP TABLE IF EXISTS kite_link;
+DROP TABLE IF EXISTS task;
+
+ALTER TABLE app_user DROP COLUMN IF EXISTS ingest_token_hash;
