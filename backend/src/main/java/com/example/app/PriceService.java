@@ -41,6 +41,33 @@ class PriceService {
             .defaultHeader("User-Agent", "Mozilla/5.0").build();
     }
 
+    record Fut(int maxLeverage, BigDecimal safetyPct) {}
+
+    private final Map<String, Fut> futCache = new ConcurrentHashMap<>();
+    private final Map<String, Instant> futFetchedAt = new ConcurrentHashMap<>();
+
+    Fut futures(String coin) {
+        Instant at = futFetchedAt.get(coin);
+        Fut cached = futCache.get(coin);
+        if (cached != null && at != null && at.plus(Duration.ofHours(6)).isAfter(Instant.now())) return cached;
+        try {
+            JsonNode n = dcx.get().uri(u -> u.path("/exchange/v1/derivatives/futures/data/instrument").queryParam("pair", "B-" + coin + "_USDT")
+                .queryParam("margin_currency_short_name", "INR").build()).retrieve().body(JsonNode.class);
+            JsonNode i = n == null ? null : n.path("instrument");
+            if (i != null && i.path("max_leverage_long").isNumber()) {
+                int max = (int) Math.max(1, Math.min(i.path("max_leverage_long").asDouble(), i.path("max_leverage_short").asDouble(i.path("max_leverage_long").asDouble())));
+                BigDecimal safety = i.path("safety_percentage").isNumber() ? i.path("safety_percentage").decimalValue() : new BigDecimal("1.5");
+                Fut f = new Fut(max, safety);
+                futCache.put(coin, f);
+                futFetchedAt.put(coin, Instant.now());
+                return f;
+            }
+        } catch (Exception e) {
+            log.warn("Futures info lookup failed for {}: {}", coin, e.toString());
+        }
+        return cached == null ? new Fut(5, new BigDecimal("2")) : cached;
+    }
+
     List<Candle> candles(String coin, String interval, int limit) {
         String key = coin + ":" + interval + ":" + limit;
         Instant at = candleFetchedAt.get(key);

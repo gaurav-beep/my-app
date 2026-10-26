@@ -36,6 +36,8 @@ record AmountIn(BigDecimal amount) {}
 
 record AutoIn(boolean enabled) {}
 
+record LeverageIn(int maxLeverage) {}
+
 record ScheduleIn(int minutes, boolean events, Integer maxTrades) {}
 
 record ProtectIn(boolean enabled, BigDecimal stopLossPct, BigDecimal takeProfitPct) {}
@@ -120,10 +122,10 @@ class LlmClient {
     }
 }
 
-record PositionView(String symbol, BigDecimal qty, BigDecimal avgCost, BigDecimal price, BigDecimal value, BigDecimal pnl, String side) {}
+record PositionView(String symbol, BigDecimal qty, BigDecimal avgCost, BigDecimal price, BigDecimal value, BigDecimal pnl, String side, int leverage, BigDecimal liqPrice, BigDecimal margin) {}
 
 record OrderView(Long id, String symbol, String side, BigDecimal qty, String status, String reason, LocalDate decidedOn,
-                 BigDecimal fillPrice, BigDecimal fees, BigDecimal amount, BigDecimal triggerPrice, String triggerDir, String source) {}
+                 BigDecimal fillPrice, BigDecimal fees, BigDecimal amount, BigDecimal triggerPrice, String triggerDir, String source, int leverage) {}
 
 record SnapView(LocalDate day, BigDecimal equity, BigDecimal benchmark) {}
 
@@ -131,4 +133,4 @@ record PaperView(BigDecimal cash, BigDecimal startCash, BigDecimal startBenchmar
                  BigDecimal benchmarkPct, List<PositionView> positions, List<OrderView> orders, List<SnapView> history,
                  String lastSummary, LocalDate lastDecisionOn, boolean autoTrade, String strategy,
                  boolean notifyEmail, boolean emailConfigured, boolean protectOn, BigDecimal stopLossPct, BigDecimal takeProfitPct,
-                 int checkMinutes, boolean eventsOn, int maxTrades, int aiTradesToday) {}
+                 int checkMinutes, boolean eventsOn, int maxTrades, int aiTradesToday, int maxLeverage, java.util.Map<String, Integer> coinLeverage) {}

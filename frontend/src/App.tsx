@@ -6,7 +6,7 @@ type ToastState = { msg: string } | null
 type Order = {
   id: number; symbol: string; side: string; qty: number; status: string; reason: string | null
   decidedOn: string; fillPrice: number | null; fees: number | null; amount?: number | null
-  triggerPrice?: number | null; triggerDir?: string | null; source?: string | null
+  triggerPrice?: number | null; triggerDir?: string | null; source?: string | null; leverage?: number
 }
 type Analysis = {
   performance: { pnl: number; returnPct: number; benchmarkPct: number | null; alphaPts: number | null; bestDay: string | null; bestDayPct: number | null; worstDay: string | null; worstDayPct: number | null; maxDrawdownPct: number; daysTracked: number }
@@ -17,11 +17,11 @@ type Analysis = {
 }
 type PaperView = {
   cash: number; startCash: number; startBenchmark: number | null; equity: number; returnPct: number; benchmarkPct: number | null
-  positions: { symbol: string; qty: number; avgCost: number; price: number | null; value: number | null; pnl: number | null; side: string }[]
+  positions: { symbol: string; qty: number; avgCost: number; price: number | null; value: number | null; pnl: number | null; side: string; leverage: number; liqPrice: number | null; margin: number }[]
   orders: Order[]
   history: { day: string; equity: number; benchmark: number | null }[]
   lastSummary: string | null; lastDecisionOn: string | null; autoTrade: boolean; strategy: string | null
-  notifyEmail: boolean; emailConfigured: boolean; protectOn: boolean; stopLossPct: number; takeProfitPct: number; checkMinutes: number; eventsOn: boolean; maxTrades: number; aiTradesToday: number
+  notifyEmail: boolean; emailConfigured: boolean; protectOn: boolean; stopLossPct: number; takeProfitPct: number; checkMinutes: number; eventsOn: boolean; maxTrades: number; aiTradesToday: number; maxLeverage: number; coinLeverage: Record<string, number>
 }
 
 type LiveView = {
@@ -243,6 +243,7 @@ function Dashboard({ showToast }: { showToast: (t: { msg: string }) => void }) {
   const [strategy, setStrategy] = useState('')
   const [analysis, setAnalysis] = useState<Analysis | null>(null)
   const [tCoin, setTCoin] = useState('BTC')
+  const [tLevRaw, setTLev] = useState(1)
   const [tSide, setTSide] = useState<'BUY' | 'SELL' | 'SHORT' | 'COVER'>('BUY')
   const [tMode, setTMode] = useState<'now' | 'price'>('now')
   const [tAmount, setTAmount] = useState('')
@@ -378,12 +379,15 @@ function Dashboard({ showToast }: { showToast: (t: { msg: string }) => void }) {
   const tPriceNow = prices[tCoin] ?? null
   const tHeld = view.positions.find(p => p.symbol === tCoin && (p.side === 'SHORT') === (tSide === 'COVER'))
   const tOpens = tSide === 'BUY' || tSide === 'SHORT'
+  const tMaxLev = view.coinLeverage?.[tCoin] ?? 1
+  const tLev = Math.max(1, Math.min(tLevRaw, tMaxLev))
+  const tLiqPct = Math.max(100 / tLev - 1.5, 0)
   const sideWord = (s: string) => ({ BUY: 'Buy', SELL: 'Sell', SHORT: 'Short', COVER: 'Cover' } as Record<string, string>)[s] ?? s
   const sidePast = (s: string) => ({ BUY: 'Bought', SELL: 'Sold', SHORT: 'Shorted', COVER: 'Covered' } as Record<string, string>)[s] ?? s
   const sideClass = (s: string) => (s === 'BUY' || s === 'COVER' ? 'buy' : 'sell')
   const submitTrade = async () => {
     const body: Record<string, unknown> = { side: tSide, symbol: tCoin }
-    if (tOpens) body.amount = Number(tAmount)
+    if (tOpens) { body.amount = Number(tAmount); body.leverage = tLev }
     else body.percent = tPercent
     if (tMode === 'price') body.price = Number(tPrice)
     await act(`${BASE}/${tMode === 'price' ? 'trigger' : 'trade'}`, undefined, body)
@@ -530,10 +534,21 @@ function Dashboard({ showToast }: { showToast: (t: { msg: string }) => void }) {
             {COINS.map(c => <option key={c} value={c}>{c}{prices[c] != null ? `  ·  ${inr(prices[c])}` : ''}</option>)}
           </select>
         </label>
-        {tSide === 'SHORT' && <small className="muted">A short earns when the price falls and loses when it rises. Your cash is set aside as backing (no leverage) and the short closes automatically if it loses 90% of it.</small>}
+        {tSide === 'SHORT' && <small className="muted">A short earns when the price falls and loses when it rises.</small>}
+        {tOpens && (
+          <div className="field">
+            <span>Leverage: <b>{tLev}x</b> <small className="muted">(CoinDCX allows up to {tMaxLev}x on {tCoin})</small></span>
+            <input type="range" min={1} max={tMaxLev} step={1} value={tLev} onChange={e => setTLev(Number(e.target.value))} aria-label="Leverage" />
+            <small className="muted">
+              {tLev === 1
+                ? 'No leverage: you put in the full amount.'
+                : `Your cash is the margin and the position is ${tLev} times bigger, so gains and losses are ${tLev} times larger. It is closed (liquidated) if the price moves about ${tLiqPct.toFixed(1)}% against you${tAmount ? `, and the position size would be ${inr(Number(tAmount) * tLev)}` : ''}.`}
+            </small>
+          </div>
+        )}
         {tOpens ? (
           <label className="field">
-            <span>{tSide === 'SHORT' ? 'Amount to short' : 'Amount to spend'}</span>
+            <span>{tLev > 1 ? 'Cash to put in (margin)' : tSide === 'SHORT' ? 'Amount to short' : 'Amount to spend'}</span>
             <div className="input-wrap">
               <b>₹</b>
               <input inputMode="decimal" value={tAmount} onChange={e => setTAmount(e.target.value.replace(/[^0-9.]/g, ''))} placeholder="1000" aria-label="Amount to spend" />
@@ -597,7 +612,7 @@ function Dashboard({ showToast }: { showToast: (t: { msg: string }) => void }) {
           const pnl = lp?.pnl ?? p.pnl
           return (
             <div key={`${p.symbol}:${p.side}`} className="card holding">
-              <div className="row gap"><Coin symbol={p.symbol} /><div><b>{p.symbol}{p.side === 'SHORT' && <span className="badge sell short-tag">SHORT</span>}</b><small className="muted block">{qtyText(p.qty)}{p.side === 'SHORT' ? ` · entry ${inr(p.avgCost)}` : ''} · now {price != null ? inr(price) : 'n/a'}</small></div></div>
+              <div className="row gap"><Coin symbol={p.symbol} /><div><b>{p.symbol}{p.side === 'SHORT' && <span className="badge sell short-tag">SHORT</span>}{p.leverage > 1 && <span className="badge buy short-tag">{p.leverage}x</span>}</b><small className="muted block">{qtyText(p.qty)}{p.side === 'SHORT' || p.leverage > 1 ? ` · entry ${inr(p.avgCost)}` : ''}{p.liqPrice != null ? ` · liquidates at ${inr(p.liqPrice)}` : ''} · now {price != null ? inr(price) : 'n/a'}</small></div></div>
               <div className="right">
                 <b>{value != null ? inr(value) : 'n/a'}</b>
                 {pnl != null && <span className={`pnl ${pnl >= 0 ? 'up' : 'down'}`}>{pnl >= 0 ? '+' : '-'}{inr(Math.abs(pnl))}</span>}
@@ -676,6 +691,13 @@ function Dashboard({ showToast }: { showToast: (t: { msg: string }) => void }) {
             onChange={e => act(`${BASE}/schedule`, 'Trade limit saved', { minutes: view.checkMinutes, events: view.eventsOn, maxTrades: Number(e.target.value) })}>
             {[1, 2, 3, 4, 6, 8, 10, 20].map(n => <option key={n} value={n}>{n} {n === 1 ? 'trade' : 'trades'} a day</option>)}
             <option value={0}>No limit</option>
+          </select>
+        </label>
+        <label className="field">
+          <span>Highest leverage the AI may choose <small className="muted">(the AI picks the amount for each trade, also limited per coin by CoinDCX)</small></span>
+          <select value={view.maxLeverage} disabled={busy} aria-label="Highest leverage for the AI"
+            onChange={e => act(`${BASE}/leverage`, 'Leverage limit saved', { maxLeverage: Number(e.target.value) })}>
+            {[1, 2, 3, 5, 10, 20, 50].map(n => <option key={n} value={n}>{n === 1 ? '1x (no leverage)' : n === 50 ? '50x (CoinDCX limits only)' : `${n}x`}</option>)}
           </select>
         </label>
         <label className="switch">

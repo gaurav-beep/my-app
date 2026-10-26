@@ -65,6 +65,8 @@ class CryptoAccount {
     boolean eventsOn = true;
     @Column(name = "max_trades")
     int maxTrades = 4;
+    @Column(name = "max_leverage")
+    int maxLeverage = 50;
     @Column(name = "calls_day")
     LocalDate callsDay;
     @Column(name = "calls_count")
@@ -85,7 +87,11 @@ class CryptoPosition {
     String side = "LONG";
     BigDecimal margin = BigDecimal.ZERO;
 
+    int leverage = 1;
+
     boolean isShort() { return "SHORT".equals(side); }
+
+    boolean margined() { return isShort() || leverage > 1; }
 }
 
 @Entity
@@ -112,6 +118,7 @@ class CryptoOrder {
     @Column(name = "trigger_dir")
     String triggerDir;
     String source = "AI";
+    int leverage = 1;
 }
 
 @Entity
@@ -154,13 +161,16 @@ interface CryptoSnapshotRepository extends JpaRepository<CryptoSnapshot, Long> {
 
 @Service
 class CryptoEngine {
-    record Proposal(String side, String symbol, BigDecimal amount, String reason) {}
+    record Proposal(String side, String symbol, BigDecimal amount, String reason, int leverage) {}
 
     static final List<String> UNIVERSE = List.of("BTC", "ETH", "BNB", "XRP", "SOL", "DOGE", "ADA", "AVAX", "DOT", "LINK");
     static final String BENCHMARK = "BTC";
     static final int MAX_ORDERS = 4;
     static final BigDecimal MAX_SHARE = new BigDecimal("0.35");
     static final BigDecimal FEE_RATE = new BigDecimal("0.002");
+    static final BigDecimal FUT_FEE_RATE = new BigDecimal("0.00059");
+    static final BigDecimal LIQ_FEE_RATE = new BigDecimal("0.01");
+    static final BigDecimal DEFAULT_SAFETY_PCT = new BigDecimal("1.5");
     static final BigDecimal SLIPPAGE = new BigDecimal("0.001");
     static final BigDecimal MIN_TRADE = new BigDecimal("200");
     private static final ZoneId IST = ZoneId.of("Asia/Kolkata");
@@ -215,7 +225,7 @@ class CryptoEngine {
     }
 
     static BigDecimal value(CryptoPosition p, BigDecimal px) {
-        if (!p.isShort()) return px.multiply(p.qty);
+        if (!p.margined()) return px.multiply(p.qty);
         return p.margin.add(pnl(p, px)).max(BigDecimal.ZERO);
     }
 
@@ -277,14 +287,17 @@ class CryptoEngine {
 
     static String buildPrompt(CryptoAccount a, List<CryptoPosition> pos, Map<String, BigDecimal> lastPrice, List<String> coinLines, BigDecimal equity) {
         StringBuilder sb = new StringBuilder();
-        sb.append("You manage a small long-only paper-trading portfolio of cryptocurrencies priced in Indian rupees. This is a simulation. ")
+        sb.append("You manage a small paper-trading portfolio of cryptocurrencies priced in Indian rupees. This is a simulation. ")
           .append("Crypto is very volatile and trades 24 hours a day. Be conservative: holding cash is a valid choice, and fewer trades are better because every trade has costs. ")
           .append("You are asked every few hours.\n\n");
-        sb.append("Rules:\n- No leverage. Use BUY to open and SELL to close a normal holding. You may also open a SHORT (a bet that the price will fall, it earns when the price drops and loses when it rises) with side SHORT, and close it with side COVER. A short is fully backed by cash and is closed automatically if it loses 90% of that cash. You may hold a long and a short in the same coin at the same time as a hedge, but a hedge cancels out most of the profit, so only do it for a clear reason.\n")
+        sb.append("Rules:\n- Use BUY to open and SELL to close a long position. You may also open a SHORT (a bet that the price will fall, it earns when the price drops and loses when it rises) with side SHORT, and close it with side COVER. You may hold a long and a short in the same coin at the same time as a hedge, but a hedge cancels out most of the profit, so only do it for a clear reason.\n")
+          .append("- Leverage: BUY and SHORT orders may include an integer \"leverage\" (default 1, meaning none). With leverage L, amount_inr is the cash you put in (the margin) and the position size is amount_inr x L, so gains and losses are multiplied by L. The highest leverage allowed per coin is listed below. A leveraged or short position is liquidated, losing nearly all of its margin, when the price moves against it by roughly (100 / L - 1.5) percent. Closing orders (SELL, COVER) use the position's own leverage, and their amount_inr is the position value to close. Spot positions (leverage 1 BUY) are not liquidated. A position keeps one leverage, so adding to it must use the same leverage.\n")
+          .append(a.protectOn ? "- Every position you open automatically gets a stop-loss at " + a.stopLossPct.stripTrailingZeros().toPlainString() + "% and a take-profit at " + a.takeProfitPct.stripTrailingZeros().toPlainString() + "% price move (the stop is tightened so it triggers before liquidation).\n" : "")
           .append("- At most ").append(MAX_ORDERS).append(" orders.\n")
-          .append("- No single coin may exceed ").append(MAX_SHARE.multiply(BigDecimal.valueOf(100)).intValue()).append("% of total equity.\n")
-          .append("- Each order is an amount in rupees (amount_inr) of at least ").append(MIN_TRADE).append(". Trades cost about ")
-          .append(FEE_RATE.multiply(BigDecimal.valueOf(100))).append("% per side.\n")
+          .append("- No single coin may exceed ").append(MAX_SHARE.multiply(BigDecimal.valueOf(100)).intValue()).append("% of total equity, counted by the cash put in.\n")
+          .append("- Each order is an amount in rupees (amount_inr) of at least ").append(MIN_TRADE).append(". Spot trades cost about ")
+          .append(FEE_RATE.multiply(BigDecimal.valueOf(100))).append("% per side, and leveraged or short trades about ")
+          .append(FUT_FEE_RATE.multiply(BigDecimal.valueOf(100)).stripTrailingZeros().toPlainString()).append("% of the position size per side.\n")
           .append("- Only use symbols from the list below.\n");
         if (a.strategy != null && !a.strategy.isBlank()) {
             sb.append("\nThe user's own strategy preferences (follow them where sensible, but never break the rules above):\n")
@@ -294,8 +307,10 @@ class CryptoEngine {
         if (pos.isEmpty()) sb.append("- none\n");
         for (CryptoPosition p : pos) {
             BigDecimal px = lastPrice.get(p.symbol);
-            if (p.isShort()) {
-                sb.append("- ").append(p.symbol).append(": SHORT ").append(p.qty.stripTrailingZeros().toPlainString()).append(" units, entry ").append(p.avgCost.setScale(2, RoundingMode.HALF_UP))
+            if (p.margined()) {
+                sb.append("- ").append(p.symbol).append(": ").append(p.isShort() ? "SHORT " : "LONG ").append(p.qty.stripTrailingZeros().toPlainString()).append(" units at ").append(p.leverage)
+                  .append("x, entry ").append(p.avgCost.setScale(2, RoundingMode.HALF_UP)).append(", margin ").append(p.margin.setScale(2, RoundingMode.HALF_UP))
+                  .append(", liquidation price ").append(liqPrice(p, DEFAULT_SAFETY_PCT).setScale(2, RoundingMode.HALF_UP))
                   .append(px == null ? "" : ", profit now " + pnl(p, px).setScale(2, RoundingMode.HALF_UP)).append("\n");
                 continue;
             }
@@ -305,12 +320,16 @@ class CryptoEngine {
         sb.append("\nMarket data (INR). Suffix h means hourly and d means daily. RSI below 30 is oversold and above 70 overbought. SMA is the simple moving average, ATR the typical daily move, and 30d range position is 0% at the 30-day low and 100% at the high:\n");
         coinLines.forEach(sb::append);
         sb.append("\nReply with JSON only, in exactly this shape:\n")
-          .append("{\"summary\":\"one or two sentences on your view\",\"orders\":[{\"side\":\"BUY\",\"symbol\":\"BTC\",\"amount_inr\":2000,\"reason\":\"short reason\"}]}\n")
+          .append("{\"summary\":\"one or two sentences on your view\",\"orders\":[{\"side\":\"BUY\",\"symbol\":\"BTC\",\"amount_inr\":2000,\"leverage\":1,\"reason\":\"short reason\"}]}\n")
           .append("Use an empty orders array if you want to do nothing.");
         return sb.toString();
     }
 
     static List<Proposal> validate(JsonNode json, BigDecimal cash, BigDecimal equity, Map<String, BigDecimal> held, Map<String, BigDecimal> last) {
+        return validate(json, cash, equity, held, last, Map.of());
+    }
+
+    static List<Proposal> validate(JsonNode json, BigDecimal cash, BigDecimal equity, Map<String, BigDecimal> held, Map<String, BigDecimal> last, Map<String, Integer> levCap) {
         List<Proposal> out = new ArrayList<>();
         Map<String, BigDecimal> qty = new LinkedHashMap<>(held);
         BigDecimal cashLeft = cash;
@@ -327,19 +346,23 @@ class CryptoEngine {
             String key = side.equals("SHORT") || side.equals("COVER") ? symbol + ":SHORT" : symbol;
             BigDecimal heldQty = qty.getOrDefault(key, BigDecimal.ZERO);
             BigDecimal heldValue = heldQty.multiply(px);
+            int lev = 1;
             if (side.equals("SELL") || side.equals("COVER")) {
                 if (heldQty.signum() <= 0) continue;
                 if (amount.compareTo(heldValue.multiply(new BigDecimal("0.98"))) >= 0 || heldValue.subtract(amount).compareTo(MIN_TRADE) < 0) amount = heldValue;
                 qty.put(key, heldQty.subtract(amount.divide(px, 10, RoundingMode.DOWN)).max(BigDecimal.ZERO));
             } else {
+                lev = Math.max(1, Math.min(o.path("leverage").asInt(1), levCap.getOrDefault(symbol, 1)));
+                BigDecimal rate = side.equals("SHORT") || lev > 1 ? FUT_FEE_RATE : FEE_RATE;
+                BigDecimal costFactor = BigDecimal.ONE.add(rate.multiply(BigDecimal.valueOf(lev)));
                 BigDecimal byShare = equity.multiply(MAX_SHARE).subtract(heldValue);
-                BigDecimal byCash = cashLeft.divide(BigDecimal.ONE.add(FEE_RATE), 2, RoundingMode.DOWN);
+                BigDecimal byCash = cashLeft.divide(costFactor, 2, RoundingMode.DOWN);
                 amount = amount.min(byShare).min(byCash);
                 if (amount.compareTo(MIN_TRADE) < 0) continue;
-                cashLeft = cashLeft.subtract(amount.multiply(BigDecimal.ONE.add(FEE_RATE)));
-                qty.put(key, heldQty.add(amount.divide(px, 10, RoundingMode.DOWN)));
+                cashLeft = cashLeft.subtract(amount.multiply(costFactor));
+                qty.put(key, heldQty.add(amount.multiply(BigDecimal.valueOf(lev)).divide(px, 10, RoundingMode.DOWN)));
             }
-            out.add(new Proposal(side, symbol, amount.setScale(2, RoundingMode.DOWN), reason));
+            out.add(new Proposal(side, symbol, amount.setScale(2, RoundingMode.DOWN), reason, lev));
         }
         return out;
     }
@@ -365,14 +388,23 @@ class CryptoEngine {
             reject(o, shortSide ? "[no short to cover]" : "[nothing to sell]");
             return;
         }
+        int lev = opening ? Math.max(1, o.leverage) : held.leverage;
+        boolean margined = shortSide || lev > 1;
+        BigDecimal rate = margined ? FUT_FEE_RATE : FEE_RATE;
+        BigDecimal feeRate = "SYSTEM".equals(o.source) ? rate.add(LIQ_FEE_RATE) : rate;
+        BigDecimal levBd = BigDecimal.valueOf(lev);
+        if (opening && held != null && held.leverage != lev) {
+            reject(o, "[this position is open at " + held.leverage + "x]");
+            return;
+        }
         BigDecimal qty;
         if (opening) {
-            BigDecimal spend = o.amountInr.min(a.cash.divide(BigDecimal.ONE.add(FEE_RATE), 2, RoundingMode.DOWN));
-            if (spend.compareTo(MIN_TRADE) < 0) {
+            BigDecimal margin = o.amountInr.min(a.cash.divide(BigDecimal.ONE.add(rate.multiply(levBd)), 2, RoundingMode.DOWN));
+            if (margin.compareTo(MIN_TRADE) < 0) {
                 reject(o, "[not enough cash]");
                 return;
             }
-            qty = spend.divide(price, 8, RoundingMode.DOWN);
+            qty = margin.multiply(levBd).divide(price, 8, RoundingMode.DOWN);
         } else {
             qty = o.amountInr.divide(price, 8, RoundingMode.DOWN).min(held.qty);
             if (qty.compareTo(held.qty.multiply(new BigDecimal("0.98"))) >= 0 || held.qty.subtract(qty).multiply(price).compareTo(MIN_TRADE) < 0) qty = held.qty;
@@ -382,9 +414,10 @@ class CryptoEngine {
             return;
         }
         BigDecimal value = qty.multiply(price).setScale(2, RoundingMode.HALF_UP);
-        BigDecimal fee = value.multiply(FEE_RATE).setScale(2, RoundingMode.HALF_UP);
+        BigDecimal fee = value.multiply(feeRate).setScale(2, RoundingMode.HALF_UP);
         if (opening) {
-            a.cash = a.cash.subtract(value.add(fee));
+            BigDecimal marginPart = value.divide(levBd, 2, RoundingMode.HALF_UP);
+            a.cash = a.cash.subtract((margined ? marginPart : value).add(fee));
             if (held == null) {
                 held = new CryptoPosition();
                 held.userId = a.userId;
@@ -393,17 +426,18 @@ class CryptoEngine {
                 held.avgCost = BigDecimal.ZERO;
                 held.side = shortSide ? "SHORT" : "LONG";
                 held.margin = BigDecimal.ZERO;
+                held.leverage = lev;
                 pos.add(held);
             }
-            BigDecimal totalCost = held.avgCost.multiply(held.qty).add(value).add(shortSide ? BigDecimal.ZERO : fee);
+            BigDecimal totalCost = held.avgCost.multiply(held.qty).add(value).add(margined ? BigDecimal.ZERO : fee);
             held.qty = held.qty.add(qty);
             held.avgCost = totalCost.divide(held.qty, 6, RoundingMode.HALF_UP);
-            if (shortSide) held.margin = held.margin.add(value);
+            if (margined) held.margin = held.margin.add(marginPart);
             positions.save(held);
         } else {
-            if (shortSide) {
+            if (margined) {
                 BigDecimal marginPart = held.margin.multiply(qty).divide(held.qty, 2, RoundingMode.HALF_UP);
-                BigDecimal profit = held.avgCost.subtract(price).multiply(qty);
+                BigDecimal profit = shortSide ? held.avgCost.subtract(price).multiply(qty) : price.subtract(held.avgCost).multiply(qty);
                 a.cash = a.cash.add(marginPart.add(profit).subtract(fee).max(BigDecimal.ZERO));
                 held.margin = held.margin.subtract(marginPart);
             } else {
@@ -420,6 +454,7 @@ class CryptoEngine {
         o.qty = qty;
         o.fillPrice = price;
         o.fees = fee;
+        o.leverage = lev;
         o.status = "FILLED";
         orders.save(o);
         accounts.save(a);
@@ -457,7 +492,12 @@ class CryptoEngine {
     void attachProtection(CryptoAccount a, CryptoPosition p) {
         boolean sh = p.isShort();
         cancelProtection(a.userId, p.symbol, sh);
-        if (a.stopLossPct != null && a.stopLossPct.signum() > 0) protect(p, a.stopLossPct, true, sh ? "ABOVE" : "BELOW");
+        BigDecimal sl = a.stopLossPct;
+        if (sl != null && sl.signum() > 0 && p.margined() && p.qty.signum() > 0 && p.avgCost.signum() > 0) {
+            BigDecimal liqPct = liqLoss(p, safetyPct(p.symbol)).multiply(BigDecimal.valueOf(100)).divide(p.qty.multiply(p.avgCost), 4, RoundingMode.HALF_UP);
+            sl = sl.min(liqPct.multiply(new BigDecimal("0.8"))).setScale(2, RoundingMode.DOWN);
+        }
+        if (sl != null && sl.signum() > 0) protect(p, sl, true, sh ? "ABOVE" : "BELOW");
         if (a.takeProfitPct != null && a.takeProfitPct.signum() > 0) protect(p, a.takeProfitPct, false, sh ? "BELOW" : "ABOVE");
         watching.set(-1);
     }
@@ -489,11 +529,15 @@ class CryptoEngine {
         boolean opens = side.equals("BUY") || side.equals("SHORT");
         boolean shortSide = side.equals("SHORT") || side.equals("COVER");
         CryptoPosition held = pos.stream().filter(p -> p.symbol.equals(symbol) && p.isShort() == shortSide).findFirst().orElse(null);
+        int lev = !opens || in.leverage() == null ? 1 : in.leverage();
+        int maxLev = opens ? maxLeverage(symbol) : 1;
         if (opens) {
             amount = in.amount();
             if (amount == null || amount.compareTo(MIN_TRADE) < 0) throw bad("The minimum amount is " + MIN_TRADE.toPlainString() + " rupees");
             if (!trigger && amount.compareTo(a.cash) > 0) throw bad("You only have " + a.cash.toPlainString() + " rupees in cash");
-            qty = amount.divide(ref, 8, RoundingMode.DOWN);
+            if (lev < 1 || lev > maxLev) throw bad("Leverage for " + symbol + " can be 1x to " + maxLev + "x on CoinDCX");
+            if (held != null && held.leverage != lev) throw bad("Your " + symbol + " position is open at " + held.leverage + "x. Use the same leverage or close it first.");
+            qty = amount.multiply(BigDecimal.valueOf(lev)).divide(ref, 8, RoundingMode.DOWN);
         } else {
             if (held == null || held.qty.signum() <= 0) throw bad(shortSide ? "You have no short on " + symbol : "You don't hold any " + symbol);
             BigDecimal pc = in.percent();
@@ -510,6 +554,7 @@ class CryptoEngine {
         o.amountInr = amount.setScale(2, RoundingMode.DOWN);
         o.decidedOn = LocalDate.now(IST);
         o.source = "USER";
+        o.leverage = lev;
         if (trigger) {
             String dir = triggerDir(ref, px);
             if (dir == null) throw bad("Pick a price different from the current price");
@@ -528,7 +573,7 @@ class CryptoEngine {
         fill(a, o, pos);
         if ("FILLED".equals(o.status)) notifyTrades(a, List.of(o), "You placed this trade.");
         String past = switch (side) { case "BUY" -> "Bought "; case "SELL" -> "Sold "; case "SHORT" -> "Shorted "; default -> "Covered "; };
-        return "FILLED".equals(o.status) ? past + o.qty.stripTrailingZeros().toPlainString() + " " + symbol + " at the live price"
+        return "FILLED".equals(o.status) ? past + o.qty.stripTrailingZeros().toPlainString() + " " + symbol + (o.leverage > 1 ? " at " + o.leverage + "x" : "") + " at the live price"
             : "Order not filled" + (o.reason == null ? "" : ": " + o.reason);
     }
 
@@ -622,6 +667,9 @@ class CryptoEngine {
         }
         String sentimentText = sentiment.block();
         if (!sentimentText.isBlank()) lines.add("\n" + sentimentText);
+        Map<String, Integer> levCap = new LinkedHashMap<>();
+        for (String coin : last.keySet()) levCap.put(coin, Math.max(1, Math.min(maxLeverage(coin), a.maxLeverage)));
+        lines.add("\nHighest leverage you may use per coin: " + levCap.entrySet().stream().map(e -> e.getKey() + " " + e.getValue() + "x").collect(java.util.stream.Collectors.joining(", ")) + ".\n");
         if (trigger != null) lines.add("\nMarket alert that triggered this check: " + trigger + ".\n");
         if (a.maxTrades > 0) lines.add("\nDaily trade limit: you may place at most " + tradesLeft + " more order(s) today, so save them for clear opportunities. Closing a position counts as an order.\n");
         if (last.size() < 5) return "Market data is unavailable right now.";
@@ -637,7 +685,7 @@ class CryptoEngine {
         }
         Map<String, BigDecimal> held = new LinkedHashMap<>();
         for (CryptoPosition p : pos) held.put(p.isShort() ? p.symbol + ":SHORT" : p.symbol, p.qty);
-        List<Proposal> props = limitOrders(validate(reply.get(), a.cash, equity, held, last), tradesLeft);
+        List<Proposal> props = limitOrders(validate(reply.get(), a.cash, equity, held, last, levCap), tradesLeft);
         List<CryptoOrder> created = new ArrayList<>();
         for (Proposal p : props) {
             CryptoOrder o = new CryptoOrder();
@@ -645,7 +693,8 @@ class CryptoEngine {
             o.symbol = p.symbol();
             o.side = p.side();
             o.amountInr = p.amount();
-            o.qty = p.amount().divide(last.get(p.symbol()), 8, RoundingMode.DOWN);
+            o.leverage = p.leverage();
+            o.qty = p.amount().multiply(BigDecimal.valueOf(p.leverage())).divide(last.get(p.symbol()), 8, RoundingMode.DOWN);
             o.status = "SUGGESTED";
             o.reason = p.reason();
             o.decidedOn = LocalDate.now(IST);
@@ -678,27 +727,46 @@ class CryptoEngine {
         snapshots.save(s);
     }
 
+    static BigDecimal liqLoss(CryptoPosition p, BigDecimal safetyPct) {
+        BigDecimal notional = p.qty.multiply(p.avgCost);
+        BigDecimal loss = p.margin.subtract(notional.multiply(safetyPct).divide(BigDecimal.valueOf(100), 8, RoundingMode.HALF_UP));
+        return loss.max(p.margin.multiply(new BigDecimal("0.05")));
+    }
+
+    static BigDecimal liqPrice(CryptoPosition p, BigDecimal safetyPct) {
+        BigDecimal d = liqLoss(p, safetyPct).divide(p.qty, 6, RoundingMode.HALF_UP);
+        return p.isShort() ? p.avgCost.add(d) : p.avgCost.subtract(d).max(BigDecimal.ZERO);
+    }
+
+    BigDecimal safetyPct(String coin) {
+        return prices.futures(coin).safetyPct();
+    }
+
+    int maxLeverage(String coin) {
+        return prices.futures(coin).maxLeverage();
+    }
+
     boolean liquidateShorts(CryptoAccount a) {
         List<CryptoPosition> pos = new ArrayList<>(positions.findByUserId(a.userId));
         List<CryptoOrder> done = new ArrayList<>();
         for (CryptoPosition p : List.copyOf(pos)) {
-            BigDecimal px = p.isShort() ? price(p.symbol) : null;
-            if (px == null || p.margin.signum() <= 0 || pnl(p, px).negate().compareTo(p.margin.multiply(new BigDecimal("0.9"))) < 0) continue;
+            BigDecimal px = p.margined() ? price(p.symbol) : null;
+            if (px == null || p.margin.signum() <= 0 || pnl(p, px).negate().compareTo(liqLoss(p, safetyPct(p.symbol))) < 0) continue;
             CryptoOrder o = new CryptoOrder();
             o.userId = a.userId;
             o.symbol = p.symbol;
-            o.side = "COVER";
+            o.side = p.isShort() ? "COVER" : "SELL";
             o.qty = p.qty;
             o.amountInr = p.qty.multiply(px).setScale(2, RoundingMode.UP);
             o.decidedOn = LocalDate.now(IST);
             o.source = "SYSTEM";
             o.status = "PENDING";
-            o.reason = "Closed automatically: this short lost 90% of its cash";
+            o.reason = "Liquidated: the loss reached the liquidation level";
             o = orders.save(o);
             fill(a, o, pos);
             if ("FILLED".equals(o.status)) done.add(o);
         }
-        if (!done.isEmpty()) notifyTrades(a, done, "A short was closed automatically to limit your loss.");
+        if (!done.isEmpty()) notifyTrades(a, done, "A leveraged or short position was liquidated to cap your loss.");
         return !done.isEmpty();
     }
 
@@ -748,7 +816,7 @@ record LivePosition(String symbol, BigDecimal price, BigDecimal value, BigDecima
 record LiveView(BigDecimal equity, BigDecimal cash, BigDecimal returnPct, BigDecimal benchmarkPct, BigDecimal benchmarkPrice,
                 List<LivePosition> positions, Map<String, BigDecimal> prices, String asOf) {}
 
-record TradeIn(String side, String symbol, BigDecimal amount, BigDecimal percent, BigDecimal price) {}
+record TradeIn(String side, String symbol, BigDecimal amount, BigDecimal percent, BigDecimal price, Integer leverage) {}
 
 @RestController
 @RequestMapping("/api/crypto-paper")
@@ -827,6 +895,14 @@ class CryptoPaperController {
         else engine.eventTargets.remove(a.userId);
     }
 
+    @PostMapping("/leverage") @ResponseStatus(HttpStatus.NO_CONTENT)
+    void leverage(@AuthenticationPrincipal Jwt jwt, @RequestBody LeverageIn in) {
+        CryptoAccount a = account(jwt);
+        if (in.maxLeverage() < 1 || in.maxLeverage() > 100) throw new ResponseStatusException(HttpStatus.BAD_REQUEST, "Choose 1x to 100x");
+        a.maxLeverage = in.maxLeverage();
+        accounts.save(a);
+    }
+
     @PostMapping("/notify") @ResponseStatus(HttpStatus.NO_CONTENT)
     void notify(@AuthenticationPrincipal Jwt jwt, @RequestBody AutoIn in) {
         CryptoAccount a = account(jwt);
@@ -867,7 +943,7 @@ class CryptoPaperController {
     LiveView live(@AuthenticationPrincipal Jwt jwt) {
         CryptoAccount a = account(jwt);
         List<CryptoPosition> pos = positions.findByUserId(a.userId);
-        if (pos.stream().anyMatch(CryptoPosition::isShort) && engine.liquidateShorts(a)) pos = positions.findByUserId(a.userId);
+        if (pos.stream().anyMatch(CryptoPosition::margined) && engine.liquidateShorts(a)) pos = positions.findByUserId(a.userId);
         List<LivePosition> lp = new ArrayList<>();
         for (CryptoPosition p : pos) {
             BigDecimal px = engine.price(p.symbol);
@@ -890,7 +966,7 @@ class CryptoPaperController {
 
     @PostMapping("/trade")
     Map<String, String> trade(@AuthenticationPrincipal Jwt jwt, @RequestBody TradeIn in) {
-        return Map.of("message", engine.place(account(jwt), new TradeIn(in.side(), in.symbol(), in.amount(), in.percent(), null)));
+        return Map.of("message", engine.place(account(jwt), new TradeIn(in.side(), in.symbol(), in.amount(), in.percent(), null, in.leverage())));
     }
 
     @PostMapping("/trigger")
@@ -924,7 +1000,8 @@ class CryptoPaperController {
             BigDecimal px = engine.price(p.symbol);
             BigDecimal value = px == null ? null : CryptoEngine.value(p, px).setScale(2, RoundingMode.HALF_UP);
             BigDecimal pnl = px == null ? null : CryptoEngine.pnl(p, px).setScale(2, RoundingMode.HALF_UP);
-            pv.add(new PositionView(p.symbol, p.qty.stripTrailingZeros(), p.avgCost, px, value, pnl, p.side));
+            pv.add(new PositionView(p.symbol, p.qty.stripTrailingZeros(), p.avgCost, px, value, pnl, p.side, p.leverage,
+                p.margined() ? CryptoEngine.liqPrice(p, engine.safetyPct(p.symbol)).setScale(4, RoundingMode.HALF_UP) : null, p.margin));
         }
         BigDecimal equity = engine.equity(a, pos);
         BigDecimal ret = equity.subtract(a.startCash).multiply(BigDecimal.valueOf(100)).divide(a.startCash, 2, RoundingMode.HALF_UP);
@@ -933,9 +1010,10 @@ class CryptoPaperController {
             : benchNow.subtract(a.startBenchmark).multiply(BigDecimal.valueOf(100)).divide(a.startBenchmark, 2, RoundingMode.HALF_UP);
         List<OrderView> ov = orders.findTop30ByUserIdOrderByIdDesc(a.userId).stream()
             .map(o -> new OrderView(o.id, o.symbol, o.side, o.qty == null ? BigDecimal.ZERO : o.qty.stripTrailingZeros(), o.status, o.reason,
-                o.decidedOn, o.fillPrice, o.fees, o.amountInr, o.triggerPrice, o.triggerDir, o.source)).toList();
+                o.decidedOn, o.fillPrice, o.fees, o.amountInr, o.triggerPrice, o.triggerDir, o.source, o.leverage)).toList();
         List<SnapView> hv = snapshots.findByUserIdOrderByDayAsc(a.userId).stream().map(s -> new SnapView(s.day, s.equity, s.benchmark)).toList();
         LocalDate decided = a.lastDecisionAt == null ? null : a.lastDecisionAt.atZone(ZoneOffset.UTC).withZoneSameInstant(IST).toLocalDate();
-        return new PaperView(a.cash, a.startCash, a.startBenchmark, equity, ret, benchPct, pv, ov, hv, a.lastSummary, decided, a.autoTrade, a.strategy, a.notifyEmail, notifier.configured(), a.protectOn, a.stopLossPct, a.takeProfitPct, a.checkMinutes, a.eventsOn, a.maxTrades, engine.aiTradesToday(a.userId));
+        return new PaperView(a.cash, a.startCash, a.startBenchmark, equity, ret, benchPct, pv, ov, hv, a.lastSummary, decided, a.autoTrade, a.strategy, a.notifyEmail, notifier.configured(), a.protectOn, a.stopLossPct, a.takeProfitPct, a.checkMinutes, a.eventsOn, a.maxTrades, engine.aiTradesToday(a.userId), a.maxLeverage,
+            CryptoEngine.UNIVERSE.stream().collect(java.util.stream.Collectors.toMap(c -> c, engine::maxLeverage, (x, y) -> x, LinkedHashMap::new)));
     }
 }

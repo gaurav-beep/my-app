@@ -77,10 +77,39 @@ class CryptoEngineTest {
     }
 
     @Test
+    void leverageIsCappedPerCoinAndCostsComeFromMargin() throws Exception {
+        var out = CryptoEngine.validate(json("""
+            {"orders":[{"side":"BUY","symbol":"BTC","amount_inr":999999,"leverage":50,"reason":"x"},
+                       {"side":"BUY","symbol":"DOGE","amount_inr":500,"leverage":50,"reason":"cash is gone"}]}"""),
+            new BigDecimal("10000"), new BigDecimal("10000"), Map.of(), LAST, Map.of("BTC", 20, "DOGE", 5));
+        assertEquals(2, out.size());
+        assertEquals(20, out.get(0).leverage());
+        assertEquals(5, out.get(1).leverage());
+        assertTrue(out.get(0).amount().compareTo(new BigDecimal("3500")) <= 0);
+        var none = CryptoEngine.validate(json("""
+            {"orders":[{"side":"BUY","symbol":"BTC","amount_inr":500,"leverage":10,"reason":"x"}]}"""),
+            new BigDecimal("10000"), new BigDecimal("10000"), Map.of(), LAST);
+        assertEquals(1, none.get(0).leverage());
+    }
+
+    @Test
+    void liquidationPriceSitsNearOneOverLeverageFromEntry() {
+        var p = new CryptoPosition();
+        p.qty = new BigDecimal("10");
+        p.avgCost = new BigDecimal("100");
+        p.margin = new BigDecimal("100");
+        p.leverage = 10;
+        assertEquals(0, new BigDecimal("91.5").compareTo(CryptoEngine.liqPrice(p, new BigDecimal("1.5"))));
+        p.side = "SHORT";
+        assertEquals(0, new BigDecimal("108.5").compareTo(CryptoEngine.liqPrice(p, new BigDecimal("1.5"))));
+        assertEquals(0, BigDecimal.ZERO.compareTo(CryptoEngine.value(p, new BigDecimal("120"))));
+    }
+
+    @Test
     void tradeLimitKeepsClosingOrdersFirst() {
-        var buy = new CryptoEngine.Proposal("BUY", "BTC", new BigDecimal("500"), "a");
-        var sell = new CryptoEngine.Proposal("SELL", "ETH", new BigDecimal("500"), "b");
-        var cover = new CryptoEngine.Proposal("COVER", "SOL", new BigDecimal("500"), "c");
+        var buy = new CryptoEngine.Proposal("BUY", "BTC", new BigDecimal("500"), "a", 1);
+        var sell = new CryptoEngine.Proposal("SELL", "ETH", new BigDecimal("500"), "b", 1);
+        var cover = new CryptoEngine.Proposal("COVER", "SOL", new BigDecimal("500"), "c", 1);
         var out = CryptoEngine.limitOrders(List.of(buy, sell, cover), 2);
         assertEquals(2, out.size());
         assertEquals("SELL", out.get(0).side());

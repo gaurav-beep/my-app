@@ -89,6 +89,7 @@ class Notifier {
             String side = switch (o.side) { case "BUY" -> "Bought"; case "SELL" -> "Sold"; case "SHORT" -> "Opened a short on"; default -> "Closed the short on"; };
             if ("SUGGESTED".equals(o.status)) side = switch (o.side) { case "BUY" -> "Suggested buy of"; case "SELL" -> "Suggested sell of"; case "SHORT" -> "Suggested short on"; default -> "Suggested cover of"; };
             sb.append("- ").append(side).append(' ').append(o.qty == null ? "" : o.qty.stripTrailingZeros().toPlainString()).append(' ').append(o.symbol);
+            if (o.leverage > 1) sb.append(" at ").append(o.leverage).append('x');
             if (o.fillPrice != null) sb.append(" at ").append(money(o.fillPrice)).append(" (fee ").append(money(o.fees)).append(')');
             else if (o.amountInr != null) sb.append(", about ").append(money(o.amountInr));
             if (!"FILLED".equals(o.status) && !"SUGGESTED".equals(o.status)) sb.append(" [").append(o.status.toLowerCase()).append(']');
